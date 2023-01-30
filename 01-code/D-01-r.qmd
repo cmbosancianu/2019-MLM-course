@@ -1,0 +1,384 @@
+---
+title: "Practice Code: Day 1"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "July 29, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: lux
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+I have to assume sufficient baseline knowledge of R, so we will start directly with some more advanced procedures. If you feel we're going to fast, please come see me after the first session ends, and I can suggest a few materials you can consult before the next few labs.
+
+Irrespective of which text editor you are using, when compiling this code file the working directory will automatically be set to the folder where this code file is located in. If you want to run the code line by line, you set the working directory on your own. You can check the current working directory with the `getwd()` function, and you can set a new working directory with the `setwd()` function.
+
+All scripts assume that you are in the directory where the code file is placed: "./01-code". They further assume that in the main "Multilevel" project folder you have the following subfolders:
+- "02-data"
+- "03-slides"
+- "04-output"
+- "05-graphs"
+
+If you have this folder structure in place, the code file should work from beginning to end without an error.^[As you've discovered so far, **R** is case-sensitive: it will produce an error if you're trying to read data from the `./02-Data` folder instead of the `02-data` one.]
+
+Helpful tips:
+- when you don't remember the arguments for a function, make use of the `help()` function
+- when you don't remember how to extract elements from an object (vector, matrix, list, statistical output), turn to the `str()` function
+- if you're missing a package on your machine, quickly install it with the following snippet of code: `install.packages("package_name", dep = TRUE, repos = "https://cran.rstudio.com")`
+
+Though the code has been written entirely from scratch, and I have replaced most of the empirical examples, a lot of the logic of the sequences is inspired by the precursor to this course, taught by Zoltan Fazekas. I was a TA for that course for a number of years, and have learned a great deal in the process.
+
+**Warning**: the code chunk below will install packages on your system (if these are not already installed).
+
+```{r load-packages}
+library(pacman)
+p_load(readstata13, tidyverse, broom, ggeffects, lmtest, texreg, knitr,
+       kableExtra, magrittr, ggthemes)
+```
+
+The `p_load()` function from the `pacman` package looks for the collection of packages you specify on your machine. If it finds them, it loads them in the working environment; if it doesn't, it downloads them, installs them, and then loads them.
+
+We also define here a few helpful functions we will rely on in this code file.
+
+```{r helpful-functions}
+fun_stderr <- function(x, na.rm = TRUE) {
+    if (na.rm) x <- na.omit(x)
+    sqrt(var(x) / length(x))
+}
+```
+
+# Reading data
+
+The code chunk below assumes that the data set is in the `02-data` folder. This means we have to go one folder up from the code folder, and then into the data folder.
+
+```{r read-data}
+df_issp <- readRDS("../02-data/01-ISSP.rds")
+```
+
+We will be using a lot of functions from the `dplyr` package and from some of the other packages that make up the `tidyverse`. Despite some opinions to the contrary ([https://github.com/matloff/TidyverseSkeptic](https://github.com/matloff/TidyverseSkeptic)), I believe it is a very elegant way of thinking about coding, and one which I think will grow in importance. It pays off to learn it early and well.
+
+The pipe operator (`%>%`) serves to take the output from a line of code, and feed it as input into the next line of code. It can be loosely translated as "with this... do that...".
+
+```{r examine-data}
+df_issp %>%
+    glimpse()
+```
+
+# Codebook
+
+Many variables added there; please check the codebook for this data set (**Codebook-ISSP.pdf**, located in the `./06-docs` folder).
+
+The most important ones for our purposes here are:
+1. `cnt`: a 2-letter code for the country from which the respondent comes from
+2. `poleff`: an index of political efficacy, obtained as a mean of `V41`, `V42`, `V43` and `V44`. Higher values denote a higher level of political efficacy
+3. `female`: a dummy indicator for gender (1 = woman; 0 = man)
+4. `age10`: continuous indicator for age, measured in decades (32 years = 3.2 decades)
+5. `educ`: number of years of full time education completed
+6. `incquart`: a country-specific placement on a 4-point income ranking (1=lowest 25% income........ 4 = highest 25% income)
+7. `year`: year of the survey
+8. `country`: full name of the country
+
+We will keep only the variables we're interested in.
+
+```{r subset-variables}
+df_issp <- df_issp %>%
+    dplyr::select(c(cnt, year, country, poleff, female,
+                    age10, educ, incquart))
+```
+
+# Examine data
+
+You already know the tools in **R** for examining data that is intended to be used in a regression analysis.
+
+```{r check-correlation}
+cor(df_issp[, c("poleff", "age10", "educ")],
+    method = "pearson",
+    use = "pairwise.complete.obs")
+```
+
+Quick summary that includes number of missing cases.
+
+```{r summary-data}
+summary(df_issp)
+```
+
+Something more specific to multilevel modeling is the need to look at breakdowns of the data and associations for each of the groups. Again, the functions in the `dplyr` package make it very convenient to do this.
+
+```{r summary-data-by-group}
+df_issp %>%
+    group_by(cnt) %>% # split data by country
+    summarise(EFF = mean(poleff, na.rm = TRUE)) %>% # get mean per group
+    kable(caption = "Average political efficacy by country",
+          digits = 2,
+          col.names = c("Country", "Average political efficacy")) %>%
+    kable_styling(full_width = FALSE)
+```
+
+Most functions can be used in this way, from median, to range, to SD etc. This can even further feed into code to display these quantities graphically, through the `ggplot2` package.
+
+```{r display-data-by-group, fig.height=6, fig.width=9, dpi=144}
+df_issp %>%
+    group_by(cnt) %>%
+    summarise(EFF = mean(poleff, na.rm = TRUE)) %>%
+    ggplot(aes(x = reorder(cnt, -EFF),
+               y = EFF)) +
+    geom_point(size = 3) +
+    labs(x = "Country",
+         y = "Average political efficacy") +
+    theme_clean() +
+    coord_flip()
+```
+
+Above, we're bringing into `ggplot()` the data set that is produced by grouping and then summarizing. `coord_flip()` simply rotates the axes by 90 degrees. The benefit of this approach is that there are no more intermediary data sets and vectors that we need to keep track of and then delete when we're done with (to free up memory space).
+
+Getting a measure of the SE of the mean is a bit more work, but it can be done with the custom function we defined at the beginning of the script.
+
+```{r display-data-by-group-with-uncertainty, fig.height=6, fig.width=9, dpi=144}
+df_issp %>%
+    group_by(cnt) %>%
+    summarise(EFF = mean(poleff, na.rm = TRUE),
+              SE = fun_stderr(poleff)) %>%
+    ggplot(aes(x = reorder(cnt, -EFF),
+               y = EFF)) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = EFF - 1.96 * SE,
+                      ymax = EFF + 1.96 * SE),
+                  width = 0, linewidth = 1.25) +
+    labs(x = "Country",
+         y = "Average political efficacy") +
+    theme_clean() +
+    coord_flip()
+```
+
+Fairly easy to plot bivariate associations as well, though it's important to keep in mind that with a large number of groups some tricks (e.g., use of color or shapes to denote group membership) are not feasible any more.
+
+```{r display-bivariate-relationships, fig.height=6, fig.width=6, dpi=144}
+df_issp %>%
+    ggplot(aes(x = educ,
+               y = poleff)) +
+    geom_point(size = 2,
+               alpha = 0.4) +
+    geom_smooth(method = "lm") +
+    labs(x = "Education (years)",
+         y = "Political efficacy") +
+    theme_clean() +
+    facet_wrap(. ~cnt, ncol = 7)
+```
+
+**QUICK TASK**: Modify the code above so that instead of separate panels we get a plot with different colors for the different countries.^[Why is there no data for Hungary?]
+
+You might reasonably doubt the existence of a linear relationship, but we can quickly check for this by using a LOESS smoother.
+
+```{r check-linear-relationship, , fig.height=9, fig.width=9, dpi=144}
+df_issp %>%
+    filter(!(cnt == "HU")) %>% # Remove Hungary from countries
+    ggplot(aes(x = educ,
+               y = poleff)) +
+    geom_point(size = 2,
+               alpha = 0.4) +
+    geom_smooth(method = "loess",
+                se = FALSE) +
+    labs(x = "Education (years)",
+         y = "Political efficacy") +
+    theme_clean() +
+    facet_wrap(.~cnt, ncol = 7)
+```
+
+Though it didn't seem like it, the graphical displays above are already testing a model specification and giving you a measure of association between the two variables. For exploratory purposes it's fine if the plots look like this, though for published work they will have to be polished further.
+
+# Regression
+
+We will add a few more predictors to the model, in addition to education. We will also remove all missing cases from the outset, for the sake of convenience.
+
+## Initial regression
+
+```{r initial-regression}
+df_issp %<>%
+    dplyr::select(age10, female, educ, poleff, cnt) %>%
+    na.omit() %>%
+    mutate(female = as.factor(female))
+
+model1.lm <- lm(poleff ~ 1 + age10 + female + educ,
+                data = df_issp)
+summary(model1.lm)
+```
+
+If something from this table of results is not clear, let's stop here for a few minutes and clarify it!
+
+You can easily extract quantities of interest from the object.
+
+```{r regression-quantities-interest-1}
+coef(model1.lm)
+fitted(model1.lm)[1:20]
+resid(model1.lm)[1:20]
+```
+
+The relationship between these quantities of interest.
+
+```{r regression-quantities-interest-2}
+data.frame(fitted = fitted(model1.lm)[1:20],
+           resid =  resid(model1.lm)[1:20],
+           eff = df_issp$poleff[1:20]) %>%
+    kable(caption = "Relationship between quantities of interest from fitted object",
+          digits = 3,
+          col.names = c("Fitted values", "Residuals", "Political efficacy (measured)")) %>%
+    kable_styling(full_width = FALSE)
+```
+
+A much more elegant way is to use the tools provided by the `broom` package. I present here only the top 20 rows, to keep things manageable from a visual perspective.
+
+```{r tidied-output-1}
+tidy(model1.lm) %>%
+    slice(1:20) %>%
+    kable(caption = "Tidied output for regression model",
+          digits = 3) %>%
+    kable_styling(full_width = FALSE)
+```
+
+```{r tidied-output-2}
+augment(model1.lm) %>%
+    slice(1:20) %>%
+    kable(caption = "Augmented output for regression model",
+          digits = 3) %>%
+    kable_styling(full_width = FALSE)
+```
+
+## Predictions
+
+Based on the regression output object, we can easily obtain predicted values. The `ggpredict()` function is available in the `ggeffects` package.^[Because the function exports a `ggplot2` object, it can be customized with the same functions that you've been using so far for your plotting.]
+
+```{r predictions-gender}
+dat <- ggpredict(model = model1.lm,
+                 terms = "female",
+                 ci.lvl = 0.95)
+
+plot(dat) +
+    labs(x = "Gender",
+         y = "Predicted political efficacy") +
+    theme_clean()
+```
+
+We can do the same for a continuous predictor.
+
+```{r predictions-education}
+dat <- ggpredict(model = model1.lm,
+                 terms = "educ",
+                 ci.lvl = 0.95)
+
+plot(dat) +
+    labs(x = "Education (years)",
+         y = "Predicted political efficacy") +
+    theme_clean()
+```
+
+## Contextual differences in effects
+We can also uncover how the effect for education is different between the different countries in our sample. We can use two functions to achieve this quickly: `nest()` from the `tidyr` package, and `map()` from the `purrr` package.
+
+```{r effect-heterogeneity, fig.height=6, fig.width=9, dpi=144}
+df_issp %>%
+    nest(data = -cnt) %>%
+    mutate(mod1 = map(data,
+                      ~lm(poleff ~ age10 + female + educ,
+                          data = .)),
+           results = map(mod1, tidy)) %>%
+    unnest(results) %>%
+    filter(term == "educ") %>%
+    ggplot(aes(x = reorder(cnt, -estimate),
+               y = estimate)) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = estimate - 1.96 * std.error,
+                      ymax = estimate + 1.96 * std.error),
+                  width = 0, linewidth = 1.25) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(x = "Country",
+         y = "Eff. of education on efficacy") +
+    theme_clean() +
+    coord_flip()
+```
+
+We can see that there are differences in effect size, but we can't really explain in a systematic way why they exist.
+
+## Regression assumptions: residuals
+
+How does our full model do in terms of regression assumptions, though? If you remember, the more important assumptions refer to the distribution of residuals from the model.
+
+```{r inspect-residuals, fig.height=6, fig.width=6, dpi=144}
+df_augment <- augment(model1.lm)
+
+# Are residuals normally distributed?
+ggplot(df_augment,
+       aes(sample = .resid)) +
+    geom_qq() +
+    geom_qq_line() +
+    theme_clean() +
+    labs(x = "Theoretical",
+         y = "Actual",
+         main = "Normal Q-Q plot")
+```
+
+Any evidence of heteroskedasticity? Typically, this procedure uses studentized residuals, but we can rely on a rough approximation here: standardized residuals.
+
+```{r inspect-heteroskedasticity, fig.height=6, fig.width=6, dpi=144}
+ggplot(df_augment,
+       aes(x = .fitted,
+           y = .std.resid)) +
+    geom_point() +
+    theme_clean() +
+    labs(x = "Fitted values",
+         y = "Standardized residuals") +
+    geom_hline(yintercept = 0,
+               size = 1.25,
+               color = "red",
+               linetype = "dashed")
+```
+
+The null hypothesis for the Breusch-Pagan test is homoskedasticity, so ideally we would fail to reject it!
+
+```{r test-heteroskedasticity}
+bptest(model1.lm)
+```
+
+No such luck in our case, though.
+
+## Corrections for clustered data
+
+Address some of the issues brought about by clustering through the use of country dummies.
+
+```{r country-dummies, results='asis'}
+model2.lm <- lm(poleff ~ 1 + age10 + female + educ +
+                    as.factor(cnt),
+                data = df_issp)
+
+htmlreg(list(model1.lm, model2.lm),
+        digits = 3,
+        custom.model.names = c("Without country dummies",
+                               "With country dummies"),
+        single.row = TRUE,
+        inline.css = TRUE,
+        html.tag = FALSE,
+        head.tag = FALSE,
+        body.tag = FALSE)
+```
+
+To find out how slopes vary between contexts, though, we would have to interact the slope for, say, education with each of the dummies in the model. This still wouldn't tell us why an effect varies between contexts, but only how. This is because any explanatory power of a country-level factor would be soaked up by the country dummies. We would only know that "the effect of education is lower in ZA than in the US", but not why this might be so.
+
+# Optional take home tasks
+
+1. Try running through the same descriptives for another variable in the model: income. Run an ANOVA between income and political efficacy on the entire sample. Plot the bivariate distribution between income and political efficacy. What's the best way of doing this, considering that there are only 4 categories of income?
+2. Run a regression of political efficacy on income, education and gender for the entire sample.
+3. Are the regression assumptions for this model met (particularly heteroskedasticity)?
+4. Predict the level of political efficacy for a respondent in the 3rd income quartile (`incquart == 3`)

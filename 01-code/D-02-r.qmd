@@ -1,0 +1,313 @@
+---
+title: "Practice Code: Day 2"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "July 30, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: lux
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, broom, ggeffects, texreg, arm, broom.mixed,
+       stringr, knitr, kableExtra, magrittr, ggthemes)
+```
+
+We also define here a few helpful functions we will rely on in this code file.
+
+```{r helpful-functions}
+fun_stderr <- function(x, na.rm = TRUE) {
+    if (na.rm) x <- na.omit(x)
+    sqrt(var(x) / length(x))
+}
+```
+
+# Reading data
+
+Read the same ISSP data set we used yesterday; we keep only the variables we will use today, and do listwise deletion of missing data from the outset.
+
+```{r read-data}
+df_issp <- readRDS("../02-data/01-ISSP.rds")
+
+df_issp %<>%
+    dplyr::select(cnt, year, country, poleff, female,
+                  age10, educ, urban, incquart, ti_cpi) %>%
+    na.omit() %>%
+    mutate(female = as.factor(female),
+           urban = as.factor(urban),
+           incquart = as.factor(incquart))
+```
+
+# Complete pooling vs. no pooling
+
+Complete pooling designates the model that we fit yesterday - it uses the entire sample to estimate the relationship between predictors and outcome, without any thought given to group membership.
+
+```{r complete-pooling-approach}
+model1.lm <- lm(poleff ~ 1 + age10 + female + educ + urban +
+                    incquart,
+                data = df_issp)
+
+summary(model1.lm)
+```
+
+Based on this model, all we can say is that the effect of education, or gender, on political efficacy is the same for every respondent, irrespective of which country they come from. Its virtue is that it uses information from the entire sample to estimate the relationship, which results in very small standard errors.
+
+The alternative is what we tried yesterday: running each model separately for each group. The challenge with this approach is that the only information used in the estimation originates with the group itself.
+
+Take as an example the case of Poland. Suppose that instead of 1,892 cases, it had 378 observations (about 20% of the original sample).
+
+```{r prepare-data-poland}
+set.seed(395722)
+df_pl <- df_issp %>%
+    sample_n(378)
+
+df_issp_temp <- rbind(subset(df_issp, !(df_issp$cnt == "PL")),
+                      df_pl)
+rm(df_pl)
+```
+
+```{r no-pooling-approach, fig.height=6, fig.width=9, dpi=144}
+df_issp_temp %>%
+    nest(data = -cnt) %>%
+    mutate(mod1 = map(data,
+                      ~lm(poleff ~ age10 + female + educ + urban,
+                          data = .)),
+           results = map(mod1, tidy)) %>%
+    unnest(results) %>%
+    filter(term == "educ") %>%
+    ggplot(aes(x = reorder(cnt, -estimate),
+               y = estimate)) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = estimate - 1.96 * std.error,
+                      ymax = estimate + 1.96 * std.error),
+                  width = 0, linewidth = 1.25) +
+    labs(x = "Country",
+         y = "Eff. of education on efficacy",
+         title = "Country-by-country regressions with small sample size for Poland") + # nolint
+    geom_hline(yintercept = 0,
+               linewidth = 1.25,
+               color = "red",
+               linetype = "dashed") +
+    theme_clean() +
+    theme(axis.text.x = element_text(angle = 45))
+```
+
+# Multilevel model: random intercepts
+
+We will use the `lmer()` function from the `lme4` package for these models. I have loaded the `arm` package because this automatically calls the `lme4` package, but also makes available some additional post-estimation function designed by Gelman and Hill.
+
+## First model
+
+```{r multilevel-ri-1}
+mlm.1 <- lmer(formula = poleff ~ 1 + age10 + female + educ + urban +
+                    incquart + (1 | cnt),
+              data = df_issp_temp,
+              REML = TRUE,
+              control = lmerControl(optimizer = "bobyqa"))
+```
+
+A few comments on the syntax above:
+
+- As long as you start with the formula syntax, there's no need to write `formula = ` every time
+- The model syntax is very similar to regression. on LHS of the `~` is the outcome, while on RHS of the `~` come the predictors (and intercept for the model). These would be the "fixed-effects" in the model.After these, inside the brackets, come the random effects
+- Add as many random effects as your specification requires before the `|`. In this case, I only have a random intercept, which is why I wrote only "1" before the `|`. On the RHS of the `|` comes the grouping factor(s), which in my case is `cnt`
+- `REML = ` specifies the type of estimation that is carried out. We will cover this in one of the next sessions. Even if you don't specify it, the model will run, as REML estimation is the default
+- `control = ` allows you to finely control the estimation process, including modifying the default tolerance value, or increase the number of maximum iterations that the model is allowed to run for. The default for `lmer()` is the `nloptwrap` optimizer, which for my data issues a convergence warning. Though the warning does not affect the estimates, it is still annoying to see. This is why I used an alternative optimizer - the results between the two are identical up to the 5th decimal point
+
+```{r multilevel-ri-2}
+summary(mlm.1)
+```
+
+Take a while to look a bit at the result output - looks fairly similar to that from the `lm()` function in how it is structured, except that it has a few additional fields: "Random effects" and "Correlation of Fixed Effects".^[Why no stars for the output? Because that's how the original creator of the package wanted it, for very good reasons: [https://stat.ethz.ch/pipermail/r-help/2006-May/094765.html](https://stat.ethz.ch/pipermail/r-help/2006-May/094765.html).]
+
+## Quantities of interest
+
+You can use a few functions to obtain the fixed effects and random effects from the model.
+
+```{r multilevel-ri-3}
+fixef(mlm.1) # The fixed effects
+```
+
+```{r multilevel-ri-4}
+se.fixef(mlm.1) # SEs for the fixed effects
+```
+
+In our case, only a random intercept was specified.
+
+```{r multilevel-ri-5}
+ranef(mlm.1) # The random effects (deviations) in the model
+```
+
+```{r multilevel-ri-6}
+# The SEs for random effects (function from the "arm" package).
+se.ranef(mlm.1)
+```
+
+You can also ask for the confidence intervals, if you prefer them.
+
+```{r multilevel-ri-7}
+confint(mlm.1,
+        level = 0.95)
+```
+
+Alternatively, you can use a function in the `broom.mixed` package that extracts the same quantities (for the first 20 countries in the sample).
+
+```{r tidied-output-1}
+tidy(mlm.1) %>%
+    kable(caption = "Tidied output for multilevel model",
+          digits = 3) %>%
+    kable_styling(full_width = FALSE)
+```
+
+```{r tidied-output-2}
+augment(ranef(mlm.1),
+        ci.level = 0.95) %>%
+    slice(1:20) %>%
+    kable(caption = "Augmented output for multilevel model",
+          digits = 3) %>%
+    kable_styling(full_width = FALSE)
+```
+
+## Comparison: no-pooling and multilevel
+
+How do the intercepts from the no-pooling model compare to those from the multilevel one?
+
+I use here the variant of "no-pooling" that Gelman and Hill describe: a model with country indicators. The "-1" tells **R** to estimate values for all countries, rather than use one of the countries as reference group.
+
+```{r comparison-nopool-mlm-1}
+model.np <- lm(poleff ~ as.factor(cnt) - 1 + age10 + female + educ +
+                    urban + incquart,
+               data = df_issp_temp)
+
+df_nopool <- model.np %>%
+    tidy() %>%
+    dplyr::select(c(term, estimate, std.error)) %>%
+    filter(str_detect(term, "cnt")) %>%
+    mutate(term = str_sub(term, start = -2),
+           model = "nopool") %>%
+    rename(cnt = term)
+rm(model.np)
+```
+
+We next generate the random effects from the multilevel model.^[In the code below we have to add the value of the overall intercept, since the random effects are deviations from this overall intercept.]
+
+```{r comparison-nopool-mlm-2}
+df_mlm <- augment(ranef(mlm.1),
+                  ci.level = 0.95)
+
+df_mlm %<>%
+    dplyr::select(c(level, estimate, std.error)) %>%
+    rename(cnt = level) %>%
+    mutate(model = "mlm",
+           estimate = estimate + fixef(mlm.1)["(Intercept)"])
+```
+
+```{r comparison-nopool-mlm-3, fig.height=6, fig.width=9, dpi=144}
+df_plot <- rbind(df_nopool, df_mlm)
+rm(df_nopool, df_mlm)
+
+df_plot %>%
+    mutate(cnt = factor(cnt, levels = cnt[model == "mlm"])) %>%
+    ggplot(aes(x = reorder(cnt, -estimate),
+               y = estimate),
+           color = model,
+           group = model) +
+    geom_point(size = 3,
+               position = position_dodge(width = 0.75),
+               aes(color = model)) +
+    labs(x = "Country",
+         y = "Effect of education on efficacy") +
+    theme_clean() +
+    geom_errorbar(aes(ymin = estimate - 1.96 * std.error,
+                      ymax = estimate + 1.96 * std.error,
+                      color = model),
+                  linewidth = 1.25,
+                  position = position_dodge(width = 0.75),
+                  width = 0) +
+    scale_color_colorblind(name = "Specifications",
+                           breaks = c("nopool","mlm"),
+                           labels = c("No pooling", "MLM"))
+
+rm(df_plot)
+```
+
+## ICC
+
+We determine the need for a MLM by running a null model, and then computing the ICC.
+
+```{r run-null-model}
+mlm.0 <- lmer(poleff ~ 1 + (1|cnt),
+              data = df_issp_temp,
+              control = lmerControl(optimizer = "bobyqa"))
+
+summary(mlm.0)
+```
+
+The output already gives you all the needed information to compute the ICC.
+
+```{r computing-icc}
+0.1063 / (0.1063 + 0.5236)
+
+rm(df_issp_temp, mlm.0)
+```
+
+# Add level-2 predictors
+
+I will first re-estimate the initial model on the full data set, with the proper data for Poland (as opposed to the truncated sample).
+
+```{r add-l2-predictors-1}
+mlm.1 <- lmer(formula = poleff ~ 1 + age10 + female + educ +
+                  urban + incquart + (1 | cnt),
+              data = df_issp,
+              REML = TRUE,
+              control = lmerControl(optimizer = "bobyqa"))
+
+mlm.2 <- lmer(formula = poleff ~ 1 + age10 + female + educ +
+                  urban + incquart + ti_cpi +
+                  (1 | cnt),
+              data = df_issp,
+              REML = TRUE,
+              control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.2)
+```
+
+```{r compare-2-models, results='asis'}
+htmlreg(list(mlm.1, mlm.2),
+        digits = 3,
+        custom.model.names = c("No L2 predictor",
+                               "L2 predictor"),
+        caption = "Comparison of 2 multilevel specifications",
+        caption.above = TRUE,
+        custom.coef.map = list("(Intercept)" = "Intercept",
+                               "age10" = "Age (in decades)",
+                               "female1" = "Gender (woman)",
+                               "educ" = "Education",
+                               "urban" = "Urban settlement",
+                               "incquart2" = "2nd income quartile",
+                               "incquart3" = "3rd income quartile",
+                               "incquart4" = "4th income quartile",
+                               "ti_cpi" = "Corruption perceptions index"),
+        single.row = FALSE,
+        inline.css = TRUE,
+        html.tag = FALSE,
+        head.tag = FALSE,
+        body.tag = FALSE)
+```
