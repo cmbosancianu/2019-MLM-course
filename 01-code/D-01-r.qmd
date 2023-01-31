@@ -15,7 +15,7 @@ format:
     toc: true
     code-fold: true
     toc-location: left
-    theme: lux
+    theme: minty
     number-sections: true
     reference-location: margin
     embed-resources: true

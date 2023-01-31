@@ -15,7 +15,7 @@ format:
     toc: true
     code-fold: true
     toc-location: left
-    theme: lux
+    theme: minty
     number-sections: true
     reference-location: margin
     embed-resources: true
@@ -59,8 +59,7 @@ In my own applied work I use the Gelman method less often, as I find that some r
 To keep things consistent with how Gelman and Hill discuss the topic, though, we will do centering and standardizing in this tutorial, though.
 
 ```{r read-data}
-# df_issp <- readRDS("../02-data/01-ISSP.rds")
-df_issp <- readRDS("~/Documents/GitHub/2019-MLM-course/02-data/01-ISSP.rds")
+df_issp <- readRDS("../02-data/01-ISSP.rds")
 
 # Select needed variables from the data
 df_issp %<>%
@@ -172,7 +171,7 @@ htmlreg(list(mlm.uncent, mlm.cent),
                                "inc2CWC" = "2nd income quartile",
                                "inc3CWC" = "3rd income quartile",
                                "inc4CWC" = "4th income quartile",
-                               "cpiCWC" = "Corruption perceptions index"),
+                               "cpiCGM" = "Corruption perceptions index"),
         single.row = FALSE,
         inline.css = TRUE,
         html.tag = FALSE,
