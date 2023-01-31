@@ -382,3 +382,12 @@ To find out how slopes vary between contexts, though, we would have to interact 
 2. Run a regression of political efficacy on income, education and gender for the entire sample.
 3. Are the regression assumptions for this model met (particularly heteroskedasticity)?
 4. Predict the level of political efficacy for a respondent in the 3rd income quartile (`incquart == 3`)
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
+

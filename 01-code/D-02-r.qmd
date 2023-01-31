@@ -28,7 +28,7 @@ We start as yesterday, by loading a few needed packages, and by defining a few c
 ```{r load-packages}
 library(pacman)
 p_load(tidyverse, broom, ggeffects, texreg, arm, broom.mixed,
-       stringr, knitr, kableExtra, magrittr, ggthemes)
+       knitr, kableExtra, magrittr, ggthemes)
 ```
 
 We also define here a few helpful functions we will rely on in this code file.
@@ -310,4 +310,12 @@ htmlreg(list(mlm.1, mlm.2),
         html.tag = FALSE,
         head.tag = FALSE,
         body.tag = FALSE)
+```
+
+# Package versions
+
+Package versions used in this script.^[Useful when trying to replicate the analyses above.]
+
+```{r package-versions}
+sessionInfo()
 ```

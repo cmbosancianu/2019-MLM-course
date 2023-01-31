@@ -1,0 +1,387 @@
+---
+title: "Practice Code: Day 3"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "July 31, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: lux
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, broom, ggeffects, texreg, arm, broom.mixed,
+       interplot, knitr, kableExtra, magrittr, ggthemes)
+```
+
+We also define here a few helpful functions we will rely on in this code file.
+
+```{r helpful-functions}
+# Function from Zoltan Fazekas
+fun_two_SD <- function(x) {
+        (x - mean(x, na.rm = TRUE)) / (2 * sd(x, na.rm = TRUE))
+}
+
+fun_cent_noSD <- function(x) {
+    x - mean(x, na.rm = TRUE)
+}
+```
+
+# Centering
+
+So far, we have run models without centering any of the variables. Based on the lecture earlier, we now have the knowledge to start centering our predictors. Just a quick reminder: centering should always be done for predictors, irrespective of whether there is a cross-level interaction in the model or not:
+
+- it will give a meaningful value to the intercept;
+- it will speed up the ML-based estimation algorithm;
+- more important, it will only estimate relationships between L1 predictors and the L1 outcome based on L1 variation, and not a mix of L1 and L2 variation.
+
+Since this centering and standardization is done over and over again, it pays off to have a dedicated function for it: `fun_two_SD()` in the previous code chunk.
+
+In my own applied work I use the Gelman method less often, as I find that some readers find it hard to switch between interpretations in the original scale and interpretations in SD-units. Additionally, I am typically not interested in assessing which variable has a stronger effect; if that is the case, I rely of predictions to show this. This is why I offer here a function only for centering: `fun_cent_noSD()` in the previous code chunk. You can use either one for your own purposes.
+
+To keep things consistent with how Gelman and Hill discuss the topic, though, we will do centering and standardizing in this tutorial, though.
+
+```{r read-data}
+# df_issp <- readRDS("../02-data/01-ISSP.rds")
+df_issp <- readRDS("~/Documents/GitHub/2019-MLM-course/02-data/01-ISSP.rds")
+
+# Select needed variables from the data
+df_issp %<>%
+    dplyr::select(cnt, year, country, poleff, female,
+                  age10, educ, urban, incquart, ti_cpi) %>%
+    na.omit()
+
+df_issp %<>%
+    mutate(inc1 = case_when(incquart==1 ~ 1,
+                            incquart %in% c(2,3,4) ~ 0),
+           inc2 = case_when(incquart==2 ~ 1,
+                            incquart %in% c(1,3,4) ~ 0),
+           inc3 = case_when(incquart==3 ~ 1,
+                            incquart %in% c(1,2,4) ~ 0),
+           inc4 = case_when(incquart==4 ~ 1,
+                            incquart %in% c(1,2,3) ~ 0))
+```
+
+In the code below, you might sometimes arrive at an error, informing you that you cannot compute the variance of a factor variable.^[This comes into play in our `fun_two_SD()` function.] If that happens, simply convert the factor variable into numeric.
+
+```{r center-level-1}
+df_issp %<>%
+    group_by(cnt) %>% # groups ISSP data by country
+    mutate(age10CWC = fun_two_SD(age10),
+           educCWC = fun_two_SD(educ),
+           femCWC = fun_two_SD(female),
+           urbanCWC = fun_two_SD(urban),
+           inc1CWC = fun_two_SD(inc1),
+           inc2CWC = fun_two_SD(inc2),
+           inc3CWC = fun_two_SD(inc3),
+           inc4CWC = fun_two_SD(inc4))
+```
+
+Our L2 data was already supplied merged with L1 data, so it first needs to be aggregated back up at the country level, then centered, and then merged back in. Grand-mean centering (even though I've used `group_by()`, it doesn't influence the centering after aggregating the values up at the country level).
+
+```{r center-level-2}
+df_agg <- df_issp %>%
+    group_by(cnt) %>% # groups ISSP by country
+    summarise(ti_cpi = mean(ti_cpi, na.rm = TRUE)) %>%
+    # Above, for each country compute mean of CPI (which is the CPI
+    # value itself for that country). The "summarise()" function
+    # generates one value of each country, so now you have each row
+    # observation a separate country.
+    mutate(cpiCGM = fun_two_SD(ti_cpi)) %>%
+    # On this country-level data set, do centering of CPI
+    dplyr::select(-ti_cpi) # Delete the uncentered version of CPI
+```
+
+Finally, we merge `df_agg` with `df_issp` using country as a matching indicator.^[This approach could easily extend to instances where you have to merge using multiple matching keys, such as country and year.]
+
+```{r final-merge}
+df_issp <- left_join(df_issp, df_agg, by = c("cnt"))
+rm(df_agg)
+```
+
+If the group-mean centering worked OK, the mean of the variable after centering in each of the groups should be 0.
+
+```{r testing-merge, results='asis'}
+df_issp %>%
+    group_by(cnt) %>%
+    summarise(original = mean(age10, na.rm = TRUE),
+              centered = mean(age10CWC, na.rm = TRUE),
+              corr = cor(age10, age10CWC)) %>%
+    kable(caption = "Testing centering worked",
+          digits = 2,
+          caption.above = TRUE,
+          col.names = c("Country", "Original version", "Centered version",
+                        "Correlation")) %>%
+    kable_styling(full_width = FALSE)
+```
+
+
+# Multilevel model: random slopes
+
+The last model we tested yesterday was the one below, though now we will do it with and without the centered versions of the variables.
+
+```{r multilevel-ri-centered-not, results='asis'}
+mlm.uncent <- lmer(poleff ~ 1 + age10 + female + educ + urban +
+                     inc2 + inc3 + inc4 + ti_cpi +
+                     (1 | cnt),
+                   data = df_issp,
+                   control = lmerControl(optimizer = "bobyqa"))
+
+mlm.cent <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                   urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                   (1 | cnt),
+                 data = df_issp,
+                 control = lmerControl(optimizer = "bobyqa"))
+
+htmlreg(list(mlm.uncent, mlm.cent),
+        digits = 3,
+        custom.model.names = c("Uncentered predictors",
+                               "Centered predictors"),
+        caption = "Comparison of 2 multilevel specifications",
+        caption.above = TRUE,
+        custom.coef.map = list("(Intercept)" = "Intercept",
+                               "age10" = "Age (in decades)",
+                               "female" = "Gender (woman)",
+                               "educ" = "Education",
+                               "urban" = "Urban settlement",
+                               "inc2" = "2nd income quartile",
+                               "inc3" = "3rd income quartile",
+                               "inc4" = "4th income quartile",
+                               "ti_cpi" = "Corruption perceptions index",
+                               "age10CWC" = "Age (in decades)",
+                               "femCWC" = "Gender (woman)",
+                               "educCWC" = "Education",
+                               "urbanCWC" = "Urban settlement",
+                               "inc2CWC" = "2nd income quartile",
+                               "inc3CWC" = "3rd income quartile",
+                               "inc4CWC" = "4th income quartile",
+                               "cpiCWC" = "Corruption perceptions index"),
+        single.row = FALSE,
+        inline.css = TRUE,
+        html.tag = FALSE,
+        head.tag = FALSE,
+        body.tag = FALSE)
+rm(mlm.uncent)
+```
+
+In this particular instance it didn't make much of a difference whether we used the centered or uncentered predictors at the L1, but in other cases it can make a big difference. For our L2 predictor (corruption perceptions index) it actually made a noticeable difference.
+
+## Initial specification
+
+Now we also allow the slope of education to randomly vary, producing a random (varying) intercept & random (varying) slope specification.
+
+```{r multilevel-ri-rs-1}
+mlm.2 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                  (1 + educCWC | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.2)
+```
+
+```{r multilevel-ri-rs-2}
+ranef(mlm.cent)
+ranef(mlm.2) # You've added one more random effect in this
+             # specification.
+```
+
+## Variation in the slope
+
+Plotting the variation in the effect of education (we did this yesterday for the intercept in a RI specification).
+
+```{r multilevel-ri-rs-3, fig.height=5, fig.width=9, dpi=144}
+ranef(mlm.2) %>%
+    augment(ci.level = 0.95) %>%
+    # Different way of writing augment(ranef(mlm.2), ci.level=0.95)
+    filter(variable == "educCWC") %>%
+    # Keep only random effects for education
+    dplyr::select(level, estimate, std.error) %>%
+    # Keep only columns identifying the country, the Beta, and SE
+    rename(cnt = level) %>%
+    mutate(estimate = estimate + fixef(mlm.2)["educCWC"]) %>%
+    # Add fixed-effect to deviation from overall slope so as to get
+    # the slope in each country
+    ggplot(aes(x = reorder(cnt, -estimate),
+               y = estimate)) +
+    geom_point(size = 3) +
+    labs(x = "Country",
+         y = "Effect of education on efficacy") +
+    theme_bw() +
+    geom_errorbar(aes(ymin = estimate - 1.96*std.error,
+                      ymax = estimate + 1.96*std.error),
+                  linewidth = 1.25,
+                  width = 0) +
+    geom_hline(yintercept = fixef(mlm.2)["educCWC"],
+               linewidth = 1.25,
+               linetype = "dashed",
+               color = "red") +
+    geom_hline(yintercept = fixef(mlm.2)["educCWC"] +
+                        1.96*se.fixef(mlm.2)["educCWC"],
+               linewidth = 1.25,
+               linetype = "dotted") +
+    geom_hline(yintercept = fixef(mlm.2)["educCWC"] -
+                        1.96*se.fixef(mlm.2)["educCWC"],
+               linewidth = 1.25,
+               linetype = "dotted") +
+    theme(axis.text.x = element_text(angle = 45))
+```
+
+The red dashed line denotes the overall slope, while the dots and whiskers plot the group slopes. You could easily generate a similar plot for the varying intercepts, if you wanted to see what is going on.
+
+You can easily see that you are estimating 3 random effects, as well as a correlation between L2 random effects. **R** estimates this by default, whereas **Stata** does not.^[Keep this in mind if at some point you notice very slight differences in results between the two software packages.] If you want to suppress this additional parameter from being estimates, it takes a simple modification of the syntax.
+
+```{r multilevel-ri-rs-4}
+mlm.temp <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                     urbanCWC + inc2CWC + inc3CWC + inc4CWC +
+                     cpiCGM + (1 | cnt) + (0 + educCWC | cnt),
+                 data = df_issp,
+                 control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.temp)
+
+rm(mlm.temp)
+```
+
+# Cross-level interactions
+
+Extend the specification by adding a predictor for the varying slope of education. The substantive implication of this is that you are now testing a hypothesis: that there is a systematic association between the magnitude of the effect of education on political efficacy, and the level of (perceived) corruption in the country.
+
+## Initial specification
+
+```{r multilevel-ri-rs-5}
+mlm.3 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC +
+                  cpiCGM + educCWC * cpiCGM + (1 + educCWC | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.3)
+```
+
+A comparative view can easily show what has changed with each model.
+
+```{r ri-rs-comparative, results='asis'}
+htmlreg(list(mlm.cent, mlm.2, mlm.3),
+        digits = 3,
+        custom.model.names = c("RI", "RI+RS",
+                               "RI+RS & pred"),
+        caption = "Comparison of 2 multilevel specifications",
+        caption.above = TRUE,
+        custom.coef.map = list("(Intercept)" = "Intercept",
+                               "age10CWC" = "Age (in decades)",
+                               "femCWC" = "Gender (woman)",
+                               "educCWC" = "Education",
+                               "urbanCWC" = "Urban settlement",
+                               "inc2CWC" = "2nd income quartile",
+                               "inc3CWC" = "3rd income quartile",
+                               "inc4CWC" = "4th income quartile",
+                               "cpiCWC" = "Corruption perceptions index",
+                               "educCWC:cpiCGM" = "Education x Corruption perceptions"),
+        single.row = FALSE,
+        inline.css = TRUE,
+        html.tag = FALSE,
+        head.tag = FALSE,
+        body.tag = FALSE)
+```
+
+## Present interaction effect
+
+A few years ago graphically presenting such interaction effects was a more code-demanding task, as in involved manually specifying a range for the moderator variable, constructing a new data set, obtaining predicted values and uncertainty for them, and then plotting these quantities. Thankfully, dedicated packages and canned functions have appeared that can do this for you in a much faster and convenient way.
+
+The `interplot()` function, from the package with the same name, is the most convenient one. It produces a `ggplot2` object, which can then be customized with the set of functions you're already familiar with.
+
+```{r cross-level-graphics-1}
+graph1 <- interplot(mlm.3,
+                    var1 = "educCWC", # focal independent variable
+                    var2 = "cpiCGM", # moderator variable
+                    ci = 0.95)
+```
+
+What gets plotted on the Y axis?
+
+```{r cross-level-graphics-2, fig.height=4, fig.width=6, dpi=144}
+graph1 +
+    theme_clean() +
+    labs(x = "Perceptions of corruption (centered)",
+         y = "Effect of education on efficacy")
+```
+
+This makes it clear, though you would be right to doubt that more than a few readers from a non-academic background would be able to interpret this plot. If writing for a less specialized audience (a blog post, a report), it might be more fruitful to present quantities that are easier to grasp.
+
+Showing predicted values gets us one step closer to the ideal of accessibility.
+
+```{r cross-level-graphics-3}
+dat1 <- ggpredict(mlm.3,
+                  terms = c("educCWC", "cpiCGM [-40, -20, 0, 20]"),
+                  ci.lvl = 0.95,
+                  type = "fe")
+```
+
+The first variable in the list of terms is the focal independent, while the second one is the moderator variable. Here, I specify distinct values for the moderator. I specify that predictions should be conditional only on fixed-effects parameters and their uncertainty.
+
+```{r cross-level-graphics-4, fig.height=6, fig.width=9, dpi=144}
+plot(dat1,
+     facet = TRUE,
+     show.title = FALSE,
+     show.x.title = FALSE,
+     show.y.title = FALSE) +
+  theme_clean() +
+  scale_x_continuous(name = "Education (CWC)") +
+  scale_y_continuous(name = "Political efficacy") +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14))
+```
+
+Unfortunately, using the canned `plot()` function gives you only a minimum amount of flexibility. If you want full control over how the plot looks, you have to access directly the quantities stored in the `dat1` object.
+
+```{r cross-level-graphics-5}
+dat1$group <- as.character(dat1$group)
+dat1 <- dat1 %>%
+    # Recode group label
+    mutate(group = case_when(group == "-40" ~ "Very low (-40)",
+                             group == "-20" ~ "Low (-20)",
+                             group == "0" ~ "Average (0)",
+                             group == "20" ~ "High (20)"))
+# Order the levels, so that in the facet plot these are listed in order.
+dat1$group <- factor(dat1$group, levels = c("Very low (-40)", "Low (-20)",
+                                            "Average (0)", "High (20)"))
+```
+
+```{r cross-level-graphics-6, fig.height=3, fig.width=9, dpi=144}
+ggplot(dat1,
+       aes(x = x,
+           y = predicted)) +
+    geom_line(linewidth = 1.5) +
+    geom_ribbon(aes(ymin = conf.low,
+                    ymax = conf.high),
+                alpha = 0.33) +
+    # The "ribbon" is the shaded area around the line that denotes
+    # uncertainty.
+    facet_wrap(.~group, ncol = 4) +
+    labs(x = "Education (CWC)",
+         y = "Political efficacy") +
+    theme_bw()
+```
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
