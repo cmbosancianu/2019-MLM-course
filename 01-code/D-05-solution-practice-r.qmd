@@ -1,0 +1,188 @@
+---
+title: "Solution to Day 5 practice session"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 5, 2019"
+bibliography: ../references.bib
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, ggeffects, texreg, arm, broom.mixed, foreign,
+       ggthemes, broom, knitr, kableExtra, magrittr)
+```
+
+We also define here the standard centering function we've been using so far.
+
+```{r helpful-functions}
+fun_cent_noSD <- function(x) {
+  x - mean(x, na.rm = TRUE)
+}
+```
+
+# Data input
+
+```{r read-data}
+df_tobacco <- read.spss(file = "../02-data/03-contributions.sav",
+                        to.data.frame = TRUE,
+                        use.value.labels = FALSE)
+```
+
+# Null model
+
+```{r mlm-null-specification}
+mlm.0 <- lmer(pct100 ~ 1 + (1 | state),
+              data = df_tobacco)
+summary(mlm.0)
+```
+
+$ICC = 363.9 / (363.9 + 926.2)$
+
+28% of the variance in vote percentage is at the between-state level, which means that it would be worth using some state-level variables to predict it.
+
+# Centering
+
+Center the predictors. I don't use here Gelman and Hill's function for centering. This is because I will try to center the `party` variable as well, and in a few states there is no variation on this variable. In these states the $SD(party) = 0$, which means that the centering will produce `NA`s in the cells, which will reduce the sample size. This is why I turn to the custom centering function.
+
+## Group-mean
+
+```{r group-mean-centering}
+df_tobacco %<>%
+  group_by(state) %>%
+  mutate(moneyCWC = fun_cent_noSD(money1000),
+         partyCWC = fun_cent_noSD(party),
+         houseCWC = fun_cent_noSD(house)) %>%
+  ungroup()
+```
+
+## Grand-mean
+
+```{r grand-mean-centering}
+df_agg <- df_tobacco %>%
+  group_by(state) %>%
+  summarise(acres = mean(acres, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(acresCGM = fun_cent_noSD(acres)) %>%
+  dplyr::select(-acres)
+
+df_tobacco <- left_join(df_tobacco, df_agg, by = c("state"))
+rm(df_agg)
+```
+
+# Level-1 model
+
+```{r l1-specification}
+mlm.1 <- lmer(pct100 ~ 1 + moneyCWC + partyCWC + houseCWC +
+                (1 | state),
+              data = df_tobacco)
+summary(mlm.1)
+```
+
+# Level-2 model
+
+```{r l2-specification}
+mlm.2 <- lmer(pct100 ~ 1 + moneyCWC + partyCWC + houseCWC +
+                acresCGM + (1 | state),
+              data = df_tobacco)
+summary(mlm.2)
+```
+
+# Random slope
+
+```{r rs-specification-1}
+mlm.3 <- lmer(pct100 ~ 1 + moneyCWC + partyCWC + houseCWC +
+                acresCGM + (1 + partyCWC | state),
+              data = df_tobacco)
+summary(mlm.3)
+```
+
+# Random slope with predictors
+
+```{r rs-specification-2}
+mlm.4 <- lmer(pct100 ~ 1 + moneyCWC + partyCWC + houseCWC +
+                acresCGM + partyCWC * acresCGM +
+                (1 + partyCWC | state),
+              data = df_tobacco)
+summary(mlm.4)
+```
+
+# Comparative table of results
+
+```{r comparison-table, results='asis'}
+htmlreg(list(mlm.0, mlm.1, mlm.2, mlm.3, mlm.4),
+        digits = 3,
+        custom.coef.names = c("(Intercept)",
+                              "Campaign contributions",
+                              "GOP member",
+                              "House member",
+                              "Acres of tobacco in state",
+                              "GOP * Acres"),
+        caption = "Comparative table of estimates: 5 MLM specifications",
+        caption.above = TRUE,
+        single.row = FALSE,
+        inline.css = TRUE,
+        html.tag = FALSE,
+        head.tag = FALSE,
+        body.tag = FALSE)
+```
+
+# Model fit
+
+```{r model-fit}
+anova(mlm.0, mlm.1, mlm.2, mlm.3, mlm.4)
+```
+
+# Interaction effect
+
+## Quick implementation
+
+```{r interaction-1, fig.height=4, fig.width=6, dpi=144}
+dat1 <- ggpredict(mlm.4,
+                  terms = c("partyCWC", "acresCGM [-12.5, -6, 0, 50, 200]"),
+                  ci.lvl = 0.95)
+
+plot(dat1) +
+  theme_clean()
+```
+
+## Manual implementation
+
+```{r interaction-2, fig.height=3, fig.width=12, dpi=144}
+ggplot(data = dat1,
+       aes(x = x,
+           y = predicted)) +
+  geom_line(linewidth = 1.25) +
+  geom_ribbon(aes(ymin = conf.low,
+                  ymax = conf.high),
+              alpha = 0.35) +
+  theme_clean() +
+  labs(x = "Party (centered)",
+       y = "Share of voting for tobacco legislation") +
+  facet_wrap(. ~ group, ncol = 5)
+```
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```

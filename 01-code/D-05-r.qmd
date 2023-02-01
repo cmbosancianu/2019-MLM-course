@@ -1,0 +1,274 @@
+---
+title: "Practice Code: Day 5"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 2, 2019"
+bibliography: ../references.bib
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, ggeffects, texreg, arm, broom.mixed,
+       ggthemes, broom, knitr, kableExtra, magrittr)
+```
+
+We also define here the standard centering function we've been using so far.
+
+```{r helpful-functions}
+# Function from Zoltan Fazekas - it's a user-defined function, so it has to be
+# re-loaded with exery new R session.
+fun_two_SD <- function(x) {
+        (x - mean(x, na.rm = TRUE)) / (2 * sd(x, na.rm = TRUE))
+}
+```
+
+# Data input and preparation
+
+We will start with a new data set today, though the focus will continue to be on predicting political efficacy. The data comes from waves 1-4 of the CSES, and it has an associated codebook which you can find in the `06-docs` subfolder.
+
+The most important variables are:
+
+1. `poleff`: index of political efficacy, constructed as an average of 2 items measuring political efficacy (`D3009` and `D3010`). Higher values denote a greater sense of political efficacy
+2. `male`: gender (man = 1; woman = 0)
+3. `age`: age, measured in years
+4. `educat`: highest educational level, measured on a 10-point scale (from "no formal education" to "doctorate or equivalent")
+5. `income`: country-specific income quintile in which the respondent is situated. 0 = bottom 20%; ... ; 4 = top 20%
+6. `turnout`: R. turned out to vote in election (1=yes; 0=no)
+7. `unmemb`: R. is union member (1=yes; 0=no)
+8. `gini10`: net Gini value at national-level, measured in 10-point units
+9. `corr_ind`: political corruption index from V-DEM data (0-1 interval, with higher values denoting more corruption)
+10. `comp`: country has compulsory voting laws (1=yes; 0=no)
+11. `cnt.year`: unique indicator for country-year
+
+We keep only the variables we're interested in - these are some of the same variables we've been using in past days, though naturally the coding will differ.
+
+I will also only keep countries that have at least 2 surveys in the data (the reason is that I want to estimate the within-country effect of country-year variables). I also exclude a mail-back survey for Germany, and keep only the telephone one for that same year.
+
+```{r read-data}
+df_cses <- readRDS("../02-data/02-CSES14-subset.rds")
+
+df_cses %<>%
+    dplyr::select(country, year, cnt.year, poleff, male, age,
+                  educat, income, unmemb, gini10, corr_ind,
+                  comp, mdmh) %>%
+    na.omit()
+
+df_cses %<>%
+    filter(country %in% c("Australia", "Austria", "Brazil", "Bulgaria",
+                          "Canada", "Czech Republic", "Denmark", "Finland",
+                          "France", "Germany", "Greece", "Hungary", "Iceland",
+                          "Israel", "Mexico", "Netherlands", "New Zealand",
+                          "Norway", "Philippines", "Poland", "Portugal",
+                          "Romania", "Slovakia", "Slovenia", "South Korea",
+                          "Spain", "Sweden", "Switzerland", "Taiwan",
+                          "Thailand", "Turkey", "United Kingdom")) %>%
+    filter(!(cnt.year == "DEU22002")) %>%
+    mutate(cnt.year = if_else(cnt.year == "DEU12002", "DEU_2002", cnt.year))
+
+df_cses %<>%
+    mutate(inc1 = if_else(income == 0, 1, 0),
+           inc2 = if_else(income == 1, 1, 0),
+           inc3 = if_else(income == 2, 1, 0),
+           inc4 = if_else(income == 3, 1, 0),
+           inc5 = if_else(income == 4, 1, 0))
+```
+
+We are left with `r dim(df_cses)[1]` respondents, from `r length(unique(df_cses$cnt.year))` surveys (country years), from `r length(unique(df_cses$country))` countries.
+
+# Centering
+
+Let's go again through the centering procedures we went through yesterday, generate the last 3 models we looked at, and display the comparison table for the models.
+
+```{r group-mean-centering-1}
+df_cses %<>%
+    group_by(cnt.year) %>%
+    mutate(ageCWC = fun_two_SD(age),
+           maleCWC = fun_two_SD(male),
+           educCWC = fun_two_SD(educat),
+           inc2CWC = fun_two_SD(inc2),
+           inc3CWC = fun_two_SD(inc3),
+           inc4CWC = fun_two_SD(inc4),
+           inc5CWC = fun_two_SD(inc5),
+           membCWC = fun_two_SD(unmemb))
+```
+
+At level 2, the group-mean centering requires an additional step.^[This is because our data set came as a single file, with both individual-level and group-level indicators included.]
+
+```{r group-mean-centering-2}
+df_agg <- df_cses %>%
+    group_by(country, year) %>%
+    summarise(gini10 = mean(gini10, na.rm = TRUE),
+              corr_ind = mean(corr_ind, na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(country) %>%
+    mutate(gini10CWC = fun_two_SD(gini10),
+           corrCWC = fun_two_SD(corr_ind)) %>%
+    dplyr::select(-gini10, -corr_ind)
+
+# Merge the centered variables into the old data set
+df_cses <- left_join(df_cses, df_agg, by = c("country", "year"))
+rm(df_agg)
+```
+
+At the country level, I center MDMH, as well as the indicator for compulsory voting. Although MDMH is technically a country-year variable, I will first aggregate it at the country-level, since it tends to be fairly stable over time (electoral changes happen relatively rarely).
+
+```{r grand-mean-centering}
+df_agg <- df_cses %>%
+    group_by(country, year) %>%
+    summarise(mdmh = mean(mdmh, na.rm = TRUE),
+              comp = mean(comp, na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(country) %>%
+    mutate(mdmhagg = mean(mdmh, na.rm = TRUE),
+           compagg = mean(comp, na.rm = TRUE)) %>%
+    dplyr::select(-mdmh, -comp) %>%
+    summarise(mdmh = unique(mdmhagg),
+              comp = unique(compagg)) %>%
+    mutate(mdmhCGM = fun_two_SD(mdmh),
+           compCGM = fun_two_SD(comp)) %>%
+    dplyr::select(-mdmh, -comp)
+
+# Merge the centered variable into the old data set
+df_cses <- left_join(df_cses, df_agg, by = c("country"))
+rm(df_agg)
+```
+
+One last thing to check: is compulsory voting truly a L3 variable?
+
+```{r check-merging, results='asis'}
+df_cses %>%
+    group_by(country, year) %>%
+    summarise(comp = mean(comp, na.rm = TRUE)) %>%
+    ungroup() %>%
+    group_by(country) %>%
+    summarise(comp = mean(comp, na.rm = TRUE)) %>%
+    ungroup() %>%
+    kable(caption = "Compulsory voting laws across countries",
+          caption.above = TRUE,
+          col.names = c("Country", "Compulsory voting"))
+```
+
+# 3-level models
+
+Now, for the modeling - let's start as usual: with a null model. It's important to be careful here with the way L2 IDs are constructed. In order to have a hierarchical 3-level model, L2 IDs must not be similar between L3 groups. If in each country the year ID would have been 1, 2, 3..., depending on how many years each country has, the model would have been interpreted by `lmer()` as a cross-classified model (more about this in Week 2).
+
+```{r mlm-null-specification}
+mlm.0 <- lmer(poleff ~ 1 + (1 | cnt.year)  + (1 | country),
+              data = df_cses,
+              control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.0)
+```
+
+You have all the information needed to compute the 2 ICCs now:
+
+1. ICC3 = $0.2018/(0.2018 + 0.1296 + 4.2907)$
+2. ICC23 = $(0.2018 + 0.1296)/(0.2018 + 0.1296 + 4.2907)$
+
+Both numbers suggest that in this sample there is very little between country, or between country-year variance in political efficacy to be explained.
+
+```{r mlm-specification-1}
+mlm.1 <- lmer(poleff ~ 1 + ageCWC + maleCWC + educCWC + inc2CWC + inc3CWC +
+                  inc4CWC + inc5CWC + membCWC + gini10CWC + corrCWC + compCGM +
+                  mdmhCGM + (1 | cnt.year) + (1 | country),
+              data = df_cses,
+              control = lmerControl(optimizer = "bobyqa"))
+```
+
+Random slopes can be added in the same way, though a bit of care neeeds to be taken when assessing at which level to allow them to vary.
+
+```{r mlm-specification-2}
+mlm.2 <- lmer(poleff ~ 1 + ageCWC + maleCWC + educCWC + inc2CWC + inc3CWC +
+                  inc4CWC + inc5CWC + membCWC + gini10CWC + corrCWC + compCGM +
+                  mdmhCGM + educCWC * corrCWC + (1 + educCWC | cnt.year) +
+                  (1 | country),
+              data = df_cses,
+              control = lmerControl(optimizer = "bobyqa"))
+```
+
+```{r display-results, results='asis'}
+htmlreg(list(mlm.1, mlm.2),
+        digits = 3,
+        custom.model.names = c("RI", "RI+RS"),
+        caption = "Comparison of 2 multilevel specifications",
+        caption.above = TRUE,
+        custom.coef.map = list("(Intercept)" = "Intercept",
+                               "ageCWC" = "Age",
+                               "maleCWC" = "Gender (man)",
+                               "educCWC" = "Education",
+                               "inc2CWC" = "2nd income quintile",
+                               "inc3CWC" = "3rd income quintile",
+                               "inc4CWC" = "4th income quintile",
+                               "inc5CWC" = "5th income quintile",
+                               "membCWC" = "Union membership",
+                               "gini10CWC" = "Income inequality (Gini)",
+                               "corrCWC" = "Perceptions of corruption",
+                               "compCGM" = "Compulsory voting laws",
+                               "mdmhCGM" = "Mean district magnitude",
+                               "educCWC:corrCWC" = "Education x Corruption perceptions"),
+        single.row = FALSE,
+        inline.css = TRUE,
+        html.tag = FALSE,
+        head.tag = FALSE,
+        body.tag = FALSE)
+```
+
+# Practice session
+
+Try your hand, by yourselves, at running a few models from the ground up. I have added in the `02-data` subfolder a dataset that deals with contributions by the tobacco lobby to members of the US Congress. The data is called `03-contributions.sav`; each line contains information about a specific member of the House or Senate. The data is sourced from @luke_multilevel_2004.
+
+The following variables are found in the data:
+
+1. `house`: whether the legislator is a member of the House (1 = House; 0 = Senate)
+2. `state`: state code
+3. `sid`: numeric ID for the state
+4. `lastname`: last name of the legislator
+5. `votepct`: % of time that a legislator votes in line with the interest of tobacco companies (0 - 1 scale)
+6. `party`: legislator is a member of the GOP (0 = Democrat; 1 = GOP)
+7. `money`: total tobacco-linked lobby groups contributions to the legislator between 1993 and 2000 (in raw USD amounts)
+8. `acres`: Number (in 1000s) of acres of tobacco harvested in the state in 1999
+9. `pct100`: % of time that a legislator votes in line with the interest of tobacco companies (0 - 100 scale)
+10. `money1000`: total tobacco-linked lobby groups contributions to the legislator between 1993 and 2000 (in 1000s of USD)
+
+Level-1 variables are `house`, `pct100`, `money1000`, `party`, and `lastname`. Level-2 variables are `acres`. ID variables are `state` and `sid` (either one).
+
+Try to explain `pct100`: what % of the time a legislator votes in favor of tobacco companies.
+
+Go through all the steps of choosing a Level-1 and a Level-2 model (it will be pretty simple, since there are very few variables you can work with).
+
+Tasks:
+
+1. Run a null model, to assess whether you need to engage in MLM, and produce an ICC
+2. Center predictors (at both Level-1 and Level-2)
+3. Run a random intercept model with individual-level predictors of `pct100`
+4. Run a random intercept model with some state-level predictors as well, in addition to the individual-level ones
+5. Run a random slope model, with a varying slope for `party`, but with no predictors for this slope
+6. Run a random slope model, which includes `acres` as a predictor for the slope of `party`
+7. Display the effect of the cross-level interaction at the previous point in a graphical format
+8. Produce a table of comparisons for the estimates of these 5 models you've run.^[The table can be a screenshot from the R console window, a HTML table, or a LaTeX table.]
+9. Which is the best fitting model of the series? Please perform a statistical test to assess this
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
