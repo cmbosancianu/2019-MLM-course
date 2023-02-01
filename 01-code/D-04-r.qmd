@@ -384,7 +384,7 @@ texreg(list(mlm.0, mlm.2, mlm.4, mlm.5),
        dcolumn = TRUE,
        use.packages = FALSE,
        caption = "Comparison of multilevel specifications for political efficacy",
-       file = "../05-output/04-Table-mlm.tex")
+       file = "../04-output/04-Table-mlm.tex")
 ```
 
 ```{r presenting-mlm-2}
@@ -399,7 +399,7 @@ htmlreg(list(mlm.0, mlm.2, mlm.4, mlm.5),
                               "Education * Corruption perceptions",
                               "Education * Gini"),
         caption = "Comparison of multilevel specifications for political efficacy",
-        file = "../05-output/04-Table-mlm.html")
+        file = "../04-output/04-Table-mlm.html")
 ```
 
 ## Coefficient plots
