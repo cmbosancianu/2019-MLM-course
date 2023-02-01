@@ -1,0 +1,554 @@
+---
+title: "Practice Code: Day 4"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 1, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, ggeffects, texreg, arm, broom.mixed,
+       ggthemes, interplot, HLMdiag, DHARMa, dotwhisker,
+       knitr, kableExtra, magrittr)
+```
+
+We also define here a few helpful functions we will rely on in this code file.
+
+```{r helpful-functions}
+# Function from Zoltan Fazekas - it's a user-defined function, so it has to be
+# re-loaded with exery new R session.
+fun_two_SD <- function(x) {
+        (x - mean(x, na.rm = TRUE)) / (2 * sd(x, na.rm = TRUE))
+}
+```
+
+# Data input and preparation
+
+We'll use the same data set as in the previous days. We're keeping only the variables we're interested in - compared to the previus days, I will add an additional level-2 predictor.
+
+```{r read-data}
+df_issp <- readRDS("../02-data/01-ISSP.rds")
+
+df_issp %<>%
+    dplyr::select(cnt, year, country, poleff, female,
+                  age10, educ, urban, incquart, ti_cpi,
+                  gini10) %>%
+    na.omit()
+
+df_issp %<>%
+    mutate(inc1 = case_when(incquart==1 ~ 1,
+                            incquart %in% c(2,3,4) ~ 0),
+           inc2 = case_when(incquart==2 ~ 1,
+                            incquart %in% c(1,3,4) ~ 0),
+           inc3 = case_when(incquart==3 ~ 1,
+                            incquart %in% c(1,2,4) ~ 0),
+           inc4 = case_when(incquart==4 ~ 1,
+                            incquart %in% c(1,2,3) ~ 0))
+```
+
+## Centering
+
+Let's go again through the centering procedures we went through yesterday, generate the last 3 models we looked at, and display the comparison table for the models.
+
+```{r group-mean-centering}
+df_issp %<>%
+    group_by(cnt) %>%
+    mutate(age10CWC = fun_two_SD(age10),
+           educCWC = fun_two_SD(educ),
+           femCWC = fun_two_SD(female),
+           urbanCWC = fun_two_SD(urban),
+           inc1CWC = fun_two_SD(inc1),
+           inc2CWC = fun_two_SD(inc2),
+           inc3CWC = fun_two_SD(inc3),
+           inc4CWC = fun_two_SD(inc4))
+```
+
+```{r grand-mean-centering}
+df_agg <- df_issp %>%
+    group_by(cnt) %>%
+    summarise(ti_cpi = mean(ti_cpi, na.rm = TRUE),
+              gini10 = mean(gini10, na.rm = TRUE)) %>%
+    mutate(cpiCGM = fun_two_SD(ti_cpi),
+           gini10CGM = fun_two_SD(gini10)) %>%
+    dplyr::select(-ti_cpi, -gini10)
+```
+
+```{r merge-data}
+df_issp <- left_join(df_issp, df_agg, by = c("cnt"))
+rm(df_agg)
+```
+
+## Initial specifications
+
+We estimate 4 specifications, in increasing level of complexity, starting with the null model.
+
+```{r mlm-specifications-1}
+mlm.0 <- lmer(poleff ~ 1 + (1 | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+mlm.1 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                  (1 | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+mlm.2 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                  (1 + educCWC | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+mlm.3 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                  educCWC * cpiCGM + (1 + educCWC | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+```
+
+# Model fit
+
+As you could see in the previous days, the `summary()` function doesn't give you any indication about the model fit. A set of dedicated functions exist for this.
+
+```{r model-fit-1}
+logLik(mlm.1)
+logLik(mlm.2)
+logLik(mlm.3)
+```
+
+You also have functions for AIC and BIC (there's not much sense to have a function for deviance, since it's computed as $-2 * logLik$).
+
+```{r model-fit-2}
+AIC(mlm.1)
+AIC(mlm.2)
+AIC(mlm.3)
+```
+
+```{r model-fit-3}
+BIC(mlm.1)
+BIC(mlm.2)
+BIC(mlm.3)
+```
+
+For a test of whether the differences in fit are statistically significant, we can turn to the `anova()` function.
+
+```{r model-fit-test-1}
+anova(mlm.1, mlm.2, mlm.3)
+```
+
+The function automatically re-fits every model in the comparison with FIML as opposed to REML, and produces a comparison table for the 3 models.
+
+Quick questions for clarification:
+
+1. Why is $DF=2$ for the comparison between Model 1 and Model 2? What are the extra 2 parameters that are estimated in Model 2?
+3. Which one is the better fitting model out of the 3?
+
+As an additional specification, let's also try a model that includes Gini as predictor for the intercept at L1.
+
+```{r mlm-specifications-2}
+mlm.4 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                  gini10CGM + educCWC * cpiCGM + (1 + educCWC | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.4)
+```
+
+Is there maybe a differential effect of Gini on education groups, though?
+
+```{r mlm-specifications-3}
+mlm.5 <- lmer(poleff ~ 1 + age10CWC + femCWC + educCWC +
+                  urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM +
+                  gini10CGM + educCWC * cpiCGM + educCWC * gini10CGM +
+                (1 + educCWC | cnt),
+              data = df_issp,
+              control = lmerControl(optimizer = "bobyqa"))
+summary(mlm.5)
+```
+
+Which one fits the data better?
+
+```{r model-fit-test-2}
+anova(mlm.3, mlm.4, mlm.5)
+```
+
+# Diagnostic checks
+
+Let's take Model 5, which seemed to be the most promising of all the specifications tested so far, at least if we judge based on the indices of model fit discussed earlier today and the LRT I conducted above.
+
+Start from examining Level-1 residuals. A custom function for computing the within-group residuals is `hlm_resid()`.
+
+```{r mlm-diagnostics-1}
+df_resid <- hlm_resid(mlm.5,
+                      level = 1)
+```
+
+## Linearity
+
+Look at a plot of residuals vs. the outcome...
+
+```{r mlm-diagnostics-2, fig.height=5, fig.width=7, dpi=144}
+ggplot(data = df_resid,
+       aes(x = poleff,
+           y = .resid)) +
+    geom_point() +
+    theme_clean() +
+  labs(x = "Political efficacy",
+       y = "Residual")
+```
+
+It's normal that it's tilted; getting rid of the tilt requires you to plot residuals against fitted values. Try it and see what comes out.
+
+... as well as residuals against the predictors at L1
+
+```{r mlm-diagnostics-3, fig.height=5, fig.width=7, dpi=144}
+ggplot(data = df_resid,
+       aes(x = age10CWC,
+           y = .resid)) +
+    geom_point(alpha = 0.05) +
+    theme_clean() +
+  labs(x = "Age (centered, in decades)",
+       y = "Residual")
+```
+
+```{r mlm-diagnostics-4, fig.height=5, fig.width=7, dpi=144}
+ggplot(data = df_resid,
+       aes(x = educCWC,
+           y = .resid)) +
+    geom_point() +
+    theme_clean() +
+  labs(x = "Education (centered)",
+       y = "Residual")
+```
+
+With dichotomous predictors there is not much chance to diagnose a non-linear trend, so we won't need to generate these plots.
+
+## Homogeneity of variance across groups
+
+This is the Bartlett-Kendall test we discussed.
+
+```{r mlm-dianostics-5}
+bartlett.test(formula = .resid ~ cnt,
+              data = df_resid)
+```
+
+Unfortunately, we soundly reject $H_0$, which means that we do **NOT** have homogeneity of variances of residuals across countries.
+
+```{r mlm-diagnostics-6}
+df_resid %>%
+    group_by(cnt) %>%
+    summarise(VAR = var(.resid)) %>%
+    ungroup() %>%
+    slice(1:15) %>%
+    kable(caption = "Country-by-country variance of residuals",
+          caption.above = TRUE,
+          digits = 2,
+          col.names = c("Country", "Residual variance"))
+```
+
+If this was an analysis intended for publishing there would be little reason to advance further, but for didactic purposes we can proceed.
+
+## Normally-distributed errors
+
+```{r mlm-diagnostics-7, fig.height=5, fig.width=7, dpi=144}
+ggplot(df_resid,
+       aes(sample = .resid)) +
+    stat_qq() +
+    stat_qq_line() +
+    theme_clean()
+```
+
+## Level 2 residuals
+
+We can do the same types of plots for the Level 2 residuals, only now we obviously only get one residual for each country.
+
+```{r mlm-diagnostics-8}
+df_resid <- hlm_resid(mlm.5,
+                      level = "cnt") %>%
+    as.data.frame()
+```
+
+```{r mlm-diagnostics-9, fig.height=5, fig.width=7, dpi=144}
+ggplot(df_resid,
+       aes(sample = .ranef.intercept)) +
+    stat_qq() +
+    stat_qq_line() +
+    theme_clean()
+```
+
+```{r mlm-diagnostics-10, fig.height=5, fig.width=7, dpi=144}
+ggplot(df_resid,
+       aes(sample = .ranef.educ_cwc)) +
+    stat_qq() +
+    stat_qq_line() +
+    theme_clean()
+```
+
+Keep in mind, though, that these are not residuals in the proper sense of the word, as we don't know what the "true" slope is in a country. Instead, each residual is an assumption about what this slope is, which comes with its own uncertainty interval.
+
+```{r mlm-diagnostics-11}
+ranef(mlm.5)
+```
+
+```{r mlm-diagnostics-12}
+se.ranef(mlm.5)
+```
+
+```{r mlm-diagnostics-13, fig.height=5, fig.width=8, dpi=144}
+df_resid <- data.frame(cnt = rownames(se.ranef(mlm.5)$cnt),
+                       int = ranef(mlm.5)$cnt$`(Intercept)`,
+                       se.int = se.ranef(mlm.5)$cnt[ ,1],
+                       edu = ranef(mlm.5)$cnt$educCWC,
+                       se.edu = se.ranef(mlm.5)$cnt[ ,2])
+
+df_resid %>%
+    ggplot(aes(x = reorder(cnt, -int),
+               y = int)) +
+    geom_point(size = 3) +
+    labs(x = "Country",
+         y = "Residual intercept") +
+    theme_clean() +
+    geom_errorbar(aes(ymin = int - 1.96 * se.int,
+                      ymax = int + 1.96 * se.int),
+                  linewidth = 1.25,
+                  width = 0) +
+    coord_flip()
+```
+
+Venezuela might be an outlier here.
+
+```{r mlm-diagnostics-14, fig.height=5, fig.width=8, dpi=144}
+df_resid %>%
+    ggplot(aes(x = reorder(cnt, -edu),
+               y = edu)) +
+    geom_point(size = 3) +
+    labs(x = "Country",
+         y = "Residual education") +
+    theme_clean() +
+    geom_errorbar(aes(ymin = edu - 1.96 * se.edu,
+                      ymax = edu + 1.96 * se.edu),
+                  linewidth = 1.25,
+                  width = 0) +
+    coord_flip()
+```
+
+Things seem fine with the random effects for education.
+
+We can continue with similar plots of predictors against residuals, to diagnose linearity, as well as visually assess constant variance.
+
+# Tasks
+
+## In class
+
+Can you quickly extract from the ISSP for each country its value on `cpiCGM` and `gini10CGM`? Then please merge these into `df_resid` as additional columns, and use these for obtaining 2 plots, of predictors on X-axis and residuals on the Y-axis. All of the functions you need to do this have been introduced already.
+
+## At home
+
+Load up again the ISSP data, and run a more complete specification at L1. Add to it religious attendance, as well as marital status, plus a quadratic term for age ($age^2$). Does this improve things in terms of residual variance across the countries?
+
+# Presenting results
+
+At this point, after choosing the best fitting model and making all the diagnostic checks (and adjustments) you need to make, you would report the results from your models. You can present the null model, or leave it for the appendix - your call. You would typically also present 1-2 intermediate specifications (perhaps gradually adding more categories of predictors: attitudinal, institutional etc), and then the final specification. Either in the main body of the paper, or in the appendix, you would also present a few sensitivity checks.
+
+Suppose that we had determined above that Model 5 truly **WAS** the best that we could do in terms of specification. How to present it?
+
+## Tables of coefficients
+
+The standard approach is to display the table of coefficients directly in the paper. In here, the functions available in the `texreg` package are invaluable, though other packages that offer similar functionality exist as well.
+
+```{r presenting-mlm-1}
+texreg(list(mlm.0, mlm.2, mlm.4, mlm.5),
+       digits = 3,
+       custom.model.names = c("Model 1","Model 2","Model 3","Model 4"),
+       single.row = FALSE,
+       custom.coef.names = c("(Intercept)", "Age (in decades)", "Gender (woman)",
+                             "Education", "Urban residence", "Income: 2nd quantile",
+                             "Income: 3rd quantile", "Income: 4th quantile",
+                             "Corruption perceptions", "Gini (10-point units)",
+                             "Education * Corruption perceptions",
+                             "Education * Gini"),
+       booktabs = TRUE,
+       dcolumn = TRUE,
+       use.packages = FALSE,
+       caption = "Comparison of multilevel specifications for political efficacy",
+       file = "../05-output/04-Table-mlm.tex")
+```
+
+```{r presenting-mlm-2}
+htmlreg(list(mlm.0, mlm.2, mlm.4, mlm.5),
+        digits = 3,
+        custom.model.names = c("Model 1","Model 2","Model 3","Model 4"),
+        single.row = FALSE,
+        custom.coef.names = c("(Intercept)", "Age (in decades)", "Gender (woman)",
+                              "Education", "Urban residence", "Income: 2nd quantile",
+                              "Income: 3rd quantile", "Income: 4th quantile",
+                              "Corruption perceptions", "Gini (10-point units)",
+                              "Education * Corruption perceptions",
+                              "Education * Gini"),
+        caption = "Comparison of multilevel specifications for political efficacy",
+        file = "../05-output/04-Table-mlm.html")
+```
+
+## Coefficient plots
+
+Alternatively, you could choose to display coefficients as *dot-and-whisker* plots. Though there are canned functions available, the one I am most familiar with has severe limitations.
+
+```{r presenting-mlm-3}
+dwplot(list(mlm.2, mlm.4, mlm.5),
+       show_intercept = FALSE) +
+    theme_clean()
+```
+
+This is why I show here the fully manual approach to plotting these quantities, even though it's a bit long.
+
+First step: tidy up model results and create an indicator variable that identifies the model from which they're obtained.
+
+```{r presenting-mlm-4}
+mod1tid <- tidy(mlm.2,
+                effects = "fixed",
+                conf.int = TRUE,
+                conf.level = 0.95)
+mod1tid <- mod1tid %>%
+    dplyr::select(-c(effect)) %>%
+    mutate(model = "model1")
+mod2tid <- tidy(mlm.4,
+                effects = "fixed",
+                conf.int = TRUE,
+                conf.level = 0.95)
+mod2tid <- mod2tid %>%
+    dplyr::select(-c(effect)) %>%
+    mutate(model = "model2")
+mod3tid <- tidy(mlm.5,
+                effects = "fixed",
+                conf.int = TRUE,
+                conf.level = 0.95)
+mod3tid <- mod3tid %>%
+    dplyr::select(-c(effect)) %>%
+    mutate(model = "model3")
+
+df_modframe <- rbind(mod1tid, mod2tid, mod3tid)
+rm(mod1tid, mod2tid, mod3tid)
+```
+
+Second stage: make variable names nice, and order coefficients based on the order in which they appear in the output of the most complete specification.
+
+```{r presenting-mlm-5}
+df_modframe %<>%
+    mutate(term = case_when(term %in% "(Intercept)" ~ "(Intercept)",
+                            term %in% "age10CWC" ~ "Age (decades)",
+                            term %in% "as.factor(female)1" ~ "Woman",
+                            term %in% "educCWC" ~ "Education",
+                            term %in% "as.factor(urban)1" ~ "Urban residence",
+                            term %in% "as.factor(incquart)2" ~ "2nd income quartile",
+                            term %in% "as.factor(incquart)3" ~ "3rd income quartile",
+                            term %in% "as.factor(incquart)4" ~ "4th income quartile",
+                            term %in% "cpiCGM" ~ "Perception of corruption",
+                            term %in% "gini10CGM" ~ "Gini (10-points)",
+                            term %in% "educCWC:cpiCGM" ~ "Education * Perceptions",
+                            term %in% "educCWC:gini10CGM" ~ "Education * Gini"))
+
+vec_term <- df_modframe$term[df_modframe$model == "model3"]
+df_modframe$term <- factor(df_modframe$term,
+                           levels = vec_term[length(vec_term):1],
+                           ordered = TRUE)
+rm(vec_term)
+```
+
+Final stage: plot the coefficients.
+
+```{r presenting-mlm-6, fig.height=5, fig.width=7, dpi=144}
+df_modframe %>%
+    dplyr::select(-c(std.error, statistic)) %>%
+    filter(!(term == "(Intercept)")) %>%
+    ggplot(aes(x = term, y = estimate, color = model)) +
+    geom_point(size = 3,
+               position = position_dodge(width = 0.5)) +
+    geom_errorbar(aes(ymin = conf.low,
+                      ymax = conf.high),
+                  width = 0.,
+                  linewidth = 1.25,
+                  position = position_dodge(width = 0.5)) +
+    geom_hline(yintercept = 0, linewidth = 1.25, linetype = "dashed",
+               color = rgb(255, 0, 90, maxColorValue = 255)) +
+      coord_flip() +
+    labs(y = "Estimate",
+         x = "Term") +
+    theme_clean() +
+    theme(axis.text.x = element_text(size = 14),
+          axis.text.y = element_text(size = 14)) +
+    scale_colour_discrete(name = "Models",
+                          breaks = c("model1", "model2", "model3"),
+                          labels = c("Model 1", "Model 2", "Model 3"))
+rm(df_modframe)
+```
+
+## Marginal effects plot
+
+Finally, if your focus is only on one of the effects, you can choose to present it using the standard marginal effects plot. Here as well it's best to stick to a manual approach.
+
+```{r presenting-mlm-7, fig.height=5, fig.width=7, dpi=144}
+pl1 <- ggpredict(mlm.5,
+                 terms = "educCWC [-8, -4, 0, 4, 8, 12]",
+                 type = "fe",
+                 ci.lvl = 0.95)
+ggplot(pl1,
+       aes(x = x, y = predicted))  +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = conf.low,
+                      ymax = conf.high),
+                  width = 0,
+                  linewidth = 1.25) +
+    labs(y = "Political efficacy",
+         x = "Education",
+         title = "") +
+    theme_clean() +
+    scale_x_continuous(breaks = c(-8, -4, 0, 4, 8, 12),
+                       labels = c("Very low","Low","Average","Above average",
+                                  "High","Very high"))
+
+rm(pl1)
+```
+
+Alternatively, you can treat the variable as properly continuous.
+
+```{r presenting-mlm-8, fig.height=5, fig.width=7, dpi=144}
+pl2 <- ggpredict(mlm.5,
+                 terms = "educCWC",
+                 type = "fe",
+                 ci.lvl = 0.95)
+ggplot(pl2,
+       aes(x = x, y = predicted))  +
+    geom_line(linewidth = 2) +
+    geom_ribbon(aes(ymin = conf.low,
+                    ymax = conf.high),
+                alpha = 0.5) +
+    labs(y = "Political efficacy",
+         x = "Education",
+         title = "") +
+    theme_clean()
+```
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
