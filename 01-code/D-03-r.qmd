@@ -68,14 +68,10 @@ df_issp %<>%
     na.omit()
 
 df_issp %<>%
-    mutate(inc1 = case_when(incquart==1 ~ 1,
-                            incquart %in% c(2,3,4) ~ 0),
-           inc2 = case_when(incquart==2 ~ 1,
-                            incquart %in% c(1,3,4) ~ 0),
-           inc3 = case_when(incquart==3 ~ 1,
-                            incquart %in% c(1,2,4) ~ 0),
-           inc4 = case_when(incquart==4 ~ 1,
-                            incquart %in% c(1,2,3) ~ 0))
+    mutate(inc1 = if_else(incquart == 1, 1, 0),
+           inc2 = if_else(incquart == 2, 1, 0),
+           inc3 = if_else(incquart == 3, 1, 0),
+           inc4 = if_else(incquart == 4, 1, 0))
 ```
 
 In the code below, you might sometimes arrive at an error, informing you that you cannot compute the variance of a factor variable.^[This comes into play in our `fun_two_SD()` function.] If that happens, simply convert the factor variable into numeric.
