@@ -1,0 +1,314 @@
+---
+title: "Practice Code: Day 6"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 5, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+We will continue with the CSES data set from Friday, though we will only take wave 3 to work with. Because of the computationally demanding nature of the estimation for GLMMs, it makes more sense to practice on a 2-level model, rather than try for a full 3-level specification.
+
+Unlike Friday, our focus will no longer be on political efficacy, but rather on turnout: whether an individual voted in the previous election, or intends to vote in the upcoming one (1 = yes; 0 = no).
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, ggeffects, texreg, arm, broom.mixed,
+       ggthemes, broom, knitr, kableExtra, magrittr)
+```
+
+We also define here the standard centering function we've been using so far.
+
+```{r helpful-functions}
+fun_two_SD <- function(x) {
+        (x - mean(x, na.rm = TRUE)) / (2 * sd(x, na.rm = TRUE))
+}
+```
+
+# Data input and preparation
+
+```{r read-data}
+df_cses <- readRDS("../02-data/02-CSES14-subset.rds")
+
+df_cses %<>%
+    filter(wave == 3) %>%
+    dplyr::select(country, year, age, male, educat,
+                  unmemb, income, urban, polinfo, turnout,
+                  corr_ind, div_ctrl, gini10, mdmh, comp) %>%
+    na.omit()
+
+df_cses %<>%
+    mutate(inc1 = if_else(income == 0, 1, 0),
+           inc2 = if_else(income == 1, 1, 0),
+           inc3 = if_else(income == 2, 1, 0),
+           inc4 = if_else(income == 3, 1, 0),
+           inc5 = if_else(income == 4, 1, 0),
+           info_high = case_when(polinfo %in% c(0,1) ~ 0,
+                                 polinfo %in% c(2,3) ~ 1),
+           urban2 = case_when(urban %in% c(0,1) ~ 0,
+                              urban %in% c(2,3) ~ 1),)
+```
+
+We are now left with only `r dim(df_cses)[1]` respondents, from `r length(unique(df_cses$country))` countries.
+
+A host of data checks could be performed. An important one is an assessment of the distribution of the outcome variable across the different groups.
+
+```{r check-turnout, results='asis'}
+df_cses %>%
+    group_by(country) %>%
+    summarise(Abstained = prop.table(table(turnout))[1],
+              Voted = prop.table(table(turnout))[2]) %>%
+    kable(caption = "Turnout distribution in the sample countries",
+          caption.above = TRUE,
+          digits = 2) %>%
+    kable_styling(full_width = TRUE)
+```
+
+It's not clear what's happening in Uruguay - I have seen instances like this before (an early 2000s Russia sample that was included in the World Values Surveys). It is likely a case of mistaken coding, and I would opt to eliminate it.
+
+```{r final-cleaning}
+df_cses %<>%
+    filter(!(country == "Uruguay"))
+```
+
+The other standard checks for the predictors, as you would do in the course of a normal model estimation procedure can be done here as well.
+
+# Centering
+
+Do the needed centering for the predictors beforehand.
+
+```{r group-mean-centering}
+df_cses %<>%
+    group_by(country) %>%
+    mutate(ageCWC = fun_two_SD(age),
+           maleCWC = fun_two_SD(male),
+           educCWC = fun_two_SD(educat),
+           membCWC = fun_two_SD(unmemb),
+           infoCWC = fun_two_SD(info_high),
+           urbanCWC = fun_two_SD(urban2),
+           inc1CWC = fun_two_SD(inc1),
+           inc2CWC = fun_two_SD(inc2),
+           inc3CWC = fun_two_SD(inc3),
+           inc4CWC = fun_two_SD(inc4),
+           inc5CWC = fun_two_SD(inc5)) %>%
+    dplyr::select(-info_high, -urban2) %>%
+    na.omit()
+```
+
+```{r grand-mean-centering}
+df_agg <- df_cses %>%
+    group_by(country) %>%
+    summarise(corr_ind = mean(corr_ind, na.rm = TRUE),
+              gini10 = mean(gini10, na.rm = TRUE),
+              comp = mean(comp, na.rm = TRUE)) %>%
+    mutate(corrCGM = fun_two_SD(corr_ind),
+           gini10CGM = fun_two_SD(gini10),
+           compCGM = fun_two_SD(comp)) %>%
+    dplyr::select(-corr_ind, -gini10, -comp)
+
+df_cses <- left_join(df_cses, df_agg, by = c("country"))
+rm(df_agg)
+```
+
+
+# Null model
+
+As with all of the previous attempts at running mixed-effects models, we can start with a null model here as well. The function to estimate a GLMM is `glmer()`.^[Notice how similar it is to `glm()` in terms of having to specify a link function for the outcome. The estimation procedure, though, is considerably more intensive than in the case of LMMs.]
+
+```{r null-model}
+mlm.0 <- glmer(turnout ~ 1 + (1 | country),
+               data = df_cses,
+               family = binomial(link = "logit"))
+summary(mlm.0)
+```
+
+You can already see from the output that no random effect at the level-1 is being reported in the model output, for the reasons I have described earlier today in the lecture session. We can still compute an approximation to the ICC in the following way: $1.015/(1.015 + 3.29)$.^[Residual error variance is fixed at $\pi^{2/3}$.]
+
+23.5% is a considerable quantity, and suggests it's worthwhile trying to include a set of country-level predictors of turnout as well.
+
+
+# Level-1 model
+
+Start by gradually adding predictors at the individual-level, until you're satisfied that you've obtained a correct specification at this level.
+
+## Initial specification
+
+```{r mlm-specification-1}
+mlm.1 <- glmer(turnout ~ 1 + ageCWC + maleCWC + educCWC +
+                   membCWC + inc2CWC + inc3CWC + inc4CWC + inc5CWC +
+                   infoCWC + urbanCWC + (1 | country),
+               data = df_cses,
+               family = binomial(link = "logit"))
+summary(mlm.1)
+```
+
+My approach has recently been to keep predictors in the model specification as long as there is theory suggesting they ought to have an impact on the outcome, irrespective of whether they are significant or not. However, if there is no theory justifying their inclusion, and they are not statistically significant, then I would normally exclude them from the model specification.
+
+```{r mlm-specification-2}
+mlm.1 <- glmer(turnout ~ 1 + ageCWC + maleCWC + educCWC +
+                   membCWC + inc2CWC + inc3CWC + inc4CWC + inc5CWC +
+                   infoCWC + (1 | country),
+               data = df_cses,
+               family = binomial(link = "logit"))
+summary(mlm.1)
+```
+
+By default the coefficients are depicted in log-odds format. You can easily get to odds by doing the converse transformation.
+
+```{r log-odds-effects}
+exp(fixef(mlm.1))
+```
+
+My advice is to try and plot the effects of these variables, using the same functions we have used for LMMs.
+
+```{r effect-plots-1, fig.height=4, fig.width=6, dpi=144}
+dat1 <- ggpredict(mlm.1,
+                  terms = "ageCWC",
+                  ci.lvl = 0.95,
+                  type = "fe")
+plot(dat1) +
+    theme_clean() +
+    labs(x = "Age (centered)",
+         y = "Turnout probability")
+rm(dat1)
+```
+
+## Model fit
+
+We also get the usual model fit measures.
+
+```{r model-fit}
+logLik(mlm.1)
+AIC(mlm.1)
+BIC(mlm.1)
+```
+
+Given that the outcome is 0 or 1, we can actually get a different type of assessment of model fit, by looking at proportion of cases correctly predicted.
+
+```{r correct-classification-1}
+df_cses$fitted.1 <- fitted(mlm.1)
+
+# Convert probabilities to actual responses (0 or 1)
+df_cses %<>%
+    mutate(resp.1 = if_else(fitted.1 > 0.5, 1, 0))
+```
+
+How are we doing in terms of correct classification?
+
+```{r correct-classification-2}
+prop.table(table(df_cses$turnout,
+                 df_cses$resp.1),
+           1) # show the table in a format where rows sum up to 1
+```
+
+It's a bit hard to tell how well we're doing in absolute terms, but we can use as a point of reference the null model.
+
+```{r correct-classification-3}
+df_cses$fitted.0 <- fitted(mlm.0)
+
+df_cses %<>%
+    mutate(resp.0 = if_else(fitted.0 > 0.5, 1, 0))
+
+prop.table(table(df_cses$turnout,
+                 df_cses$resp.0),
+           1)
+```
+
+You can get assessments like this for separate groups in your sample.
+
+```{r correct-classification-4}
+prop.table(table(df_cses$turnout[df_cses$country == "Portugal"],
+                 df_cses$resp.1[df_cses$country == "Portugal"]),
+           1)
+```
+
+
+# Level-2 model
+
+Estimating this will take a fair amount of time, at least in relative terms, when you compare it to a comparable specification in terms of complexity in the case of a LMM.
+
+```{r mlm-specification-3}
+mlm.2 <- glmer(turnout ~ 1 + ageCWC + maleCWC + educCWC +
+                   membCWC + inc2CWC + inc3CWC + inc4CWC + inc5CWC +
+                   infoCWC + corrCGM + gini10CGM + compCGM +
+                   (1 | country),
+               data = df_cses,
+               family = binomial(link = "logit"))
+summary(mlm.2)
+```
+
+Predictions will work equally well for L2 variables.
+
+```{r effect-plots-2, fig.height=4, fig.width=6, dpi=144}
+dat2 <- ggpredict(mlm.2,
+                  terms = "compCGM",
+                  ci.lvl = 0.95,
+                  type = "fe")
+plot(dat2) +
+    theme_clean() +
+    labs(x = "Compulsory voting (centered)",
+         y = "Turnout probability")
+rm(dat2)
+```
+
+# Cross-level interaction
+
+I skip the intermediary step of specifying a random slope for one of the L1 predictors, and move directly into testing a cross-level interaction.
+
+```{r cross-level-interaction}
+mlm.3 <- glmer(turnout ~ 1 + ageCWC + maleCWC + educCWC +
+                   membCWC + inc2CWC + inc3CWC + inc4CWC + inc5CWC +
+                   infoCWC + corrCGM + gini10CGM + compCGM +
+                   corrCGM * inc5CWC + (1 + inc5CWC | country),
+               data = df_cses,
+               family = binomial(link = "logit"))
+summary(mlm.3)
+```
+
+How do you interpret this interaction effect?
+
+```{r effect-plots-3}
+dat3 <- ggpredict(mlm.3,
+                  terms = c("inc5CWC", "corrCGM [-0.2, 0, 0.2]"),
+                  ci.lvl = 0.95,
+                  type = "fe")
+plot(dat3,
+     facets = TRUE) +
+     theme_clean()
+```
+
+# Task
+
+How would you generate a similar plot without the `ggpredict()` function? Though you might think it's needless, it will help you get a sense of how to do this step-by-step.
+
+Suggestions:
+
+1. You will have to create a data set for predictions, where all the other predictors in the model are held either at their mean, or their modal value. Look into the `expand.grid()` function for this.
+2. To generate the predictions based on this data set, you will have to make use of the `predictInterval()` function in the `merTools` package.
+
+Following these two steps, it's a simple plotting command.
+
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
