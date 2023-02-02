@@ -1,0 +1,306 @@
+---
+title: "Practice Code: Day 8"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 7, 2019"
+bibliography: ../references.bib
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+The data for today comes from @hox_multilevel_2010, and refers to 1,000 pupils who attend 100 different primary schools. After graduating from these, they go on to attend 30 different secondary schools. Therefore, students are nested in both primary and secondary schools, with primary and secondary schools crossed: a cross-classification of primary and secondary schools. The outcome variable is a measure of school achievement recorded in the secondary stage (`ACHIEV`).
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, ggeffects, texreg, arm, broom.mixed,
+       ggthemes, broom, foreign, knitr, kableExtra, magrittr)
+```
+
+We also define here the standard centering function we've been using so far.
+
+```{r helpful-functions}
+fun_two_SD <- function(x) {
+        (x - mean(x, na.rm = TRUE)) / (2 * sd(x, na.rm = TRUE))
+}
+```
+
+At the level-1, predictors are gender (`PUPSEX`: 0 = male; 1 = female) and a continuous measure of SES background of the student (`PUPSES`: ranging from 1 = lowest to 6 = highest). At the school level, there are 2 dichotomous indicators for whether the primary school was denominational (`PDENOM`: 0 = no; 1 = yes), or whether the second school was denominational (`SDENOM`: 0 = no; 1 = yes).
+
+More important, we have 3 sets of ID indicators: for the student (`PUPIL`), for the primary school (`PSCHOOL`) and for the secondary school (`SSCHOOL`).
+
+# Read data
+
+The data is in `SPSS` format, so we will have to use the same function  used on Friday, for the "tobacco" data.
+
+```{r read-data}
+df_school <- read.spss(file = "../02-Data/04-cross-classified-Hox-2010.sav",
+                       to.data.frame = TRUE,
+                       use.value.labels = FALSE)
+
+df_school %>%
+    glimpse()
+```
+
+# Data structure
+
+Is every student nested in one and only one secondary school?
+
+```{r data-structure-1}
+length(unique(df_school$PUPIL)) == nrow(df_school)
+```
+
+We now know that pupil IDs are unique in the data set. Now check to see how many unique IDs are in each secondary school.
+
+```{r data-structure-2}
+df_agg <- df_school %>%
+    group_by(SSCHOOL) %>%
+    summarise(N = length(unique(PUPIL)))
+
+sum(df_agg$N) == nrow(df_school)
+rm(df_agg)
+```
+
+This means each ID is present only once in each school. If all we had was information about secondary schools, we would analyze this as a two-level hierarchical model, with the tools we already acquired last week.
+
+```{r data-structure-3}
+df_agg <- df_school %>%
+    group_by(PSCHOOL) %>%
+    summarise(N = length(unique(PUPIL)))
+
+sum(df_agg$N) == nrow(df_school)
+rm(df_agg)
+```
+
+It's the same case with primary school membership. But what about membership in each secondary school?
+
+```{r data-structure-4, results='asis'}
+df_school %>%
+    group_by(SSCHOOL) %>%
+    summarise(N = length(unique(PSCHOOL))) %>%
+    slice(1:20) %>%
+    kable(caption = "Membership in each secondary school (first 20 IDs)",
+          caption.above = TRUE,
+          col.names = c("Secondary school ID", "Unique primary schools"))
+```
+
+We have graduates from between 14 to 32 primary schools in a secondary school.
+
+```{r data-structure-5, results='asis'}
+df_school %>%
+    group_by(PSCHOOL) %>%
+    summarise(N = length(unique(SSCHOOL))) %>%
+    slice(1:20) %>%
+    kable(caption = "How widely primary schools place children (first 20 IDs)",
+          caption.above = TRUE,
+          col.names = c("Primary school ID", "Unique secondary schools"))
+```
+
+Similarly, each primary school sends its graduates to multiple secondary schools. In this sense, we have a cross-classification on our hands, for which the standard way of writing up the model in R does not work.
+
+# Importance of IDs
+
+Before we get started, it's important to be aware of the role of properly coding ID variables in these models. The reason for this is that the syntax for cross-classified models looks identical to that for 3-level hierarchical models. The only thing that distinguishes them is how the IDs are constructed.
+
+1. District 1 (two schools, each with 4 students)
+  - School A IDs: 1, 2, 3, 4
+  - School B IDs: 5, 6, 7, 8
+2. District 2 (two schools, each with 4 students)
+  - School C IDs: 9, 10, 11, 12
+  - School D IDs: 13, 14, 15, 16
+
+In the example above, this will be recognized by **R** as a 3-level model, since none of the level-2 IDs (A, B, C, D) repeat themselves across districts. ID "A", for example, is clearly present only in District 1.
+
+1. District 1 (two schools, each with 4 students)
+  - School A IDs: 1, 2, 3, 4
+  - School B IDs: 5, 6, 7, 8
+2. District 2 (two schools, each with 4 students)
+  - School A IDs: 9, 10, 11, 12
+  - School B IDs: 13, 14, 15, 16
+
+In the example above, though, the level-2 IDs do repeat themselves across level-3 units. In this configuration, **R** will believe that a level-1 student is nested in *BOTH* districts and schools, and estimate is as a cross-classification.
+
+If the level-2 ID is simply the school name, imagine how many instances of *George Washington Elementary* or *Goethe Gymnasium* exist out there. The take-home message of this is that you have to make sure the IDs are suited for the kind of model you will estimate.
+
+# Cross-classified specifications
+
+```{r cross-classified-1}
+mlm.01 <- lmer(ACHIEV ~ 1 + (1 | SSCHOOL),
+               data = df_school)
+mlm.02 <- lmer(ACHIEV ~ 1 + (1 | PSCHOOL),
+               data = df_school)
+mlm.0 <- lmer(ACHIEV ~ 1 + (1 | PSCHOOL) + (1 | SSCHOOL),
+              data = df_school)
+anova(mlm.01, mlm.0)
+anova(mlm.02, mlm.0)
+rm(mlm.01, mlm.02)
+```
+
+The cross-classified model formulation fits the data considerably better than in instances where we treat it as a standard hierarchical structure.
+
+## Initial model
+
+```{r summary-results-1}
+summary(mlm.0)
+```
+
+You see that you get a residual at each level of the cross-classification. Based on the results in the output, can you compute the ICCs?
+
+Also notice the varying length of the residuals (below).
+
+```{r random-effects-1}
+ranef(mlm.0)
+```
+
+```{r random-effects-2, results='asis'}
+ranef(mlm.0) %>% 
+    augment(ci.level = 0.95) %>%
+    group_by(grp) %>%
+    slice(1:10) %>%
+    ungroup()  %>%
+    dplyr::select(-level, -variable) %>%
+    kable(caption = "10 random effects by type of school, with 95% CIs",
+          caption.above = TRUE,
+          digits = 3,
+          col.names = c("Group", "Estimate", "QQ", "SE", "Lower bound CI",
+                        "Upper bound CI"))
+```
+
+**Quick task**: Continue the code above to generate 2 plots: one of the varying intercepts across primary schools, and one of the varying intercepts across secondary schools. These should be plotted not as deviations from the overall intercept, but rather intercepts in their own right.
+
+## Additional specifications
+
+Begin adding predictors to your model.
+
+```{r cross-classified-2}
+mlm.1 <- lmer(ACHIEV ~ 1 + PUPSEX + PUPSES + 
+                (1 | PSCHOOL) + (1 | SSCHOOL),
+              data = df_school)
+summary(mlm.1)
+```
+
+```{r cross-classified-3}
+mlm.2 <- lmer(ACHIEV ~ 1 + PUPSEX + PUPSES + PDENOM + SDENOM + 
+                (1 | PSCHOOL) + (1 | SSCHOOL),
+              data = df_school)
+summary(mlm.2)
+```
+
+```{r model-fit-1}
+anova(mlm.1, mlm.2)
+```
+
+## Centering predictors
+
+```{r group-mean-centering}
+df_school %<>% 
+  group_by(PSCHOOL) %>% 
+  mutate(gendCWC = fun_two_SD(PUPSEX),
+         sesCWC = fun_two_SD(PUPSES)) %>%
+  ungroup()
+```
+
+Center grand-mean center the predictors inside their own groups.
+
+```{r grand-mean-centering}
+df_agg1 <- df_school %>%
+    group_by(PSCHOOL) %>%
+    summarise(PDENOM = mean(PDENOM, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(denomPCWC = fun_two_SD(PDENOM)) %>%
+    dplyr::select(-PDENOM)
+
+df_agg2 <- df_school %>%
+    group_by(SSCHOOL) %>%
+    summarise(SDENOM = mean(SDENOM, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(denomSCWC = fun_two_SD(SDENOM)) %>%
+    dplyr::select(-SDENOM)
+
+df_school <- left_join(df_school, df_agg1, by = "PSCHOOL")
+df_school <- left_join(df_school, df_agg2, by = "SSCHOOL")
+rm(df_agg1, df_agg2)
+```
+
+Re-estimate previous model with centered versions of variables.
+
+```{r cross-classified-4}
+mlm.2 <- lmer(ACHIEV ~ 1 + gendCWC + sesCWC + denomPCWC + denomSCWC + 
+                (1 | PSCHOOL) + (1 | SSCHOOL),
+              data = df_school)
+```
+
+Allow the slope of SES to randomly vary.
+
+```{r cross-classified-5}
+mlm.3 <- lmer(ACHIEV ~ 1 + gendCWC + sesCWC + denomPCWC + denomSCWC + 
+                (1 + sesCWC | PSCHOOL) + (1 | SSCHOOL),
+              data = df_school)
+summary(mlm.3)
+```
+
+The model that tries to explain the varying slope of SES across primary schools based on the denominational nature of the school.
+
+```{r cross-classified-6}
+mlm.4 <- lmer(ACHIEV ~ 1 + gendCWC + sesCWC + denomPCWC + denomSCWC + 
+                 sesCWC * denomPCWC + (1 + sesCWC | PSCHOOL) + (1 | SSCHOOL),
+              data = df_school)
+summary(mlm.4)
+```
+
+```{r model-fit-2}
+anova(mlm.2, mlm.3)
+```
+
+# Task
+
+To give you the chance to practice these models a bit, I allocated a second data set for a practice session. This data still focuses on students, but envisions the cross-classification in a different way: students are now nested in both neighborhood and schools. Neighborhoods send students to multiple schools, and a school can recruit students from multiple neighborhoods, so it is theoretically interesting to investigate whether school achievement is connected stronger to school-level factors or neighborhood-level ones.
+
+The data comes from the Scottish Neighborhood Study, and includes a single education authority in the country. There are 2,310 students with valid observations in the sample, who originate from 524 neighborhoods and who attend 21 schools.
+
+You can find information on:
+
+1. `neighid`: neighborhood ID
+2. `schid`: school ID
+3. `attain`: end-of-school educational attainment, reflecting both academic performance and length of study
+4. `p7vrq`: verbal-reasoning quotient (from a test in primary school at age 11-12)
+5. `p7read`: reading test score (from a test at the same age, in primary school)
+6. `dadocc`: father's occupation, recorded on the Hope-Goldthorpe scale
+7. `dadunemp`: father unemployed (1 = yes; 0 = no)
+8. `daded`: father's schooling continued after the age of 15 (1 = yes; 0 = no)
+9. `momed`: mother's schooling continued after the age of 15 (1 = yes; 0 = no)
+10. `male`: student gender (1 = male; 0 = female)
+11. `deprive`: social deprivation score in the neighborhood, derived from poverty concentration in the area, health indicators of the population, and the quality of the housing stock
+
+Go through some of the same steps as we did above, on your own:
+
+- Graphically examine student membership in schools and neighborhoods, to determine whether this is truly a case of cross-classification
+- Run a null model
+- Run a model with only individual-level predictors of attainment (`p7vrq`, `p7read`, `male`)
+- Add family predictors to this model (`dadocc`, `dadunemp`, `daded`, `momed`). Check for the correlation between `daded` and `momed`, and see whether they can both be included in the model
+- Assess whether this individual+family model fits the data better than the one with just individual predictors
+- Run a model that also includes a neighborhood predictor (`deprive`)
+- Compute the average level of reading in the school, and add this as a predictor in the model (at school level)
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
