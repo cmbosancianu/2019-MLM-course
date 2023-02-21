@@ -1,0 +1,538 @@
+---
+title: "Practice Code: Day 9"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 8, 2019"
+bibliography: ../references.bib
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+This code represents both a tutorial into **MrP** (multilevel regression with post-stratification), as well as an application to the 2016 election of a procedure to which many authors have contributed: Andrew Gelman, Jeffrey Lax, Justin Phillips, Yair Ghitza, and likely many others. Though I have altered their code in a few areas, most of it has been produced as part of their continued collaboration. I am grateful to them for making the code available to the wider community.
+
+```{r load-packages}
+library(pacman)
+p_load(tidyverse, arm, car, maps, readxl, readstata13, ggeffects,
+       data.table, texreg, broom.mixed, ggthemes, broom, knitr,
+       kableExtra, magrittr, scales)
+```
+
+The MRP procedure will require the collection of a large set of additional information, to be used in the estimation. For the sake of speed and convenience I have done this outside of the current code, and have only shared the final, cleaned data sets. Wherever needed, I have left in a comment with instructions about what additional data needs to be collected and how it out to be processed.
+
+Because of the limited time we have available, I will only focus on turnout probabilities across subgroups in the population, though this code could be easily used to estimate vote preference as well (as long as a large-enough data set with vote preference information at the individual level will be made available).
+
+```{r helpful-functions}
+# Weighted mean function
+WMean <- function(a,
+                  w = rep(1, length(a)),
+                  subset = rep(TRUE, length(a))) {
+  keep <- !is.na(a) & !is.na(w) & !is.na(subset) & subset
+  return(sum((w * a)[keep]) / sum(w[keep]))
+}
+
+# The functions are used to adjust estimated turnout figures for
+# subgroups in a state so that the vote totals add up to the 
+# official vote numbers (if they are available).
+
+FindDelta <- function(delta, a, w, x0)
+  abs(x0 - sum(invlogit(logit(a) + delta) * w))
+
+CorrectWeighted <- function(a, w, x0) {
+  delta <- optimize(FindDelta, interval = c(-5, 5), a, w, x0)$minimum
+  corrected <- invlogit(logit(a) + delta)
+  return(list(delta = delta, corrected = corrected))
+}
+
+# Logit transformation
+logit <- function (a) log(a / (1 - a))
+```
+
+Before starting, we define a few helper functions that have been taken directly from the @ghitza_deep_2013 replication code. The functions serve in the production of the MRP estimates. Though canned functions already exist for these, they have been written from the ground up in base `R` code, so that they don't depend on any package that might later change, and then break the code.
+
+
+# Define labels
+
+This part represents a simplification of the @ghitza_deep_2013 code. I use fewer socio-demographic groups than they do, so as to maximize the likelihood of the model converging.
+
+Labels for the different societal groups (state, race, income, age, and education) have to be defined. `state.abb` is a vector of US states' abbreviations which `R` has in its memory.
+
+```{r define-labels}
+state.label <- c(state.abb[1:8], "DC", state.abb[9:50])
+ethnic.label <- c("White", "African-American", "Other")
+income.label <- c("$0-25k", "$25-60k", "$60k+")
+age.label <- c("18-44", "45-65+")
+educat.label <- c("<= HS", "Some Coll", ">Coll")
+```
+
+More characteristics could certainly be included, such as gender, marital status, or regional placement. Additionally, the existing categories could be made finer still, though this will come at the "cost" of increased uncertainty when estimating their turnout propensities. For the sake of keeping things manageable, I made the categories somewhat coarse.
+
+```{r vector-length}
+n.stt <- length(state.label)
+n.eth <- length(ethnic.label)
+n.inc <- length(income.label)
+n.age <- length(age.label)
+n.edu <- length(educat.label)
+```
+
+# Read state-level data
+
+State-level information can help in the MrP procedure, since we can freely include state-level information in the estimation - it serves to improve precision of the estimates, and therefore of the predictions themselves.
+
+```{r read-data-1}
+df_state <- read.csv(file = "../02-data/State-info-MRP.csv",
+                     header = TRUE,
+                     sep = ",")
+```
+
+The state-level predictors used are median income in the state in 2016, share of Evangelicals and Mormons in the population of the state, and turnout among the voting eligible population at the midterm elections in 2014. Additional information can be used, if available. We do basic cleaning for these variables below.^[The `rescale()` function from the `arm` package is the one that replaces our custom `fun_two_SD()` function. Notice how it treats dichotomous variables!]
+
+```{r clean-data-1}
+df_state %<>% 
+  dplyr::select(state, income16, religsh, VEPtotal14,
+                ballots16) %>%
+  mutate(z.income16 = arm::rescale(income16),
+         z.religsh = arm::rescale(religsh),
+         z.VEPtotal14 = arm::rescale(VEPtotal14),
+         state = as.character(state),
+         state = if_else(state == "D.C.", "District of Columbia", state))
+
+state.label2 <- c(state.name[1:8], "District of Columbia",
+                  state.name[9:50])
+
+for(i in 1:n.stt) {
+  df_state$state[df_state$state == state.label2[i]] <- i
+}
+
+df_state$state <- as.numeric(df_state$state)
+rm(state.label2)
+```
+
+Everything looks good in terms of correlations - we can include them as predictors in the MLM.
+
+```{r check-correlations}
+round(cor(df_state[ ,c("z.income16", "z.religsh", "z.VEPtotal14")],
+          use = "pairwise.complete.obs"),
+      digits = 2)
+```
+
+
+# Read individual-level data
+
+Unfortunately, the raw CPS data is too large to upload in the repository. So I have already selected the needed variables from it, so as to reduce the size of the data set.^[If you want to run the code chunk below as well, please download the original CPS data ([https://www.census.gov/data/datasets/time-series/demo/cps/cps-basic.html](https://www.census.gov/data/datasets/time-series/demo/cps/cps-basic.html)), rename it, and place it in the `02-data` subfolder.]
+
+Needed variables:
+
+1. vote - `pes1`,
+2. region - `gereg`,
+3. state - `gestfips`,
+4. ethnicity - `ptdtrace`,
+5. income - `hefaminc`,
+6. age - `prtage`,
+7. sex - `pesex`,
+8. education - `peeduca`,
+9. marital status - `pemaritl`
+10. citizen status - `prcitshp`
+
+```{r read-data-2, eval=FALSE}
+df_cps <- read.dta13("../02-data/cpsnov2016.dta")
+
+df_cps %<>% 
+  dplyr::select(ptdtrace, hefaminc, prtage, pesex, peeduca,
+                pemaritl, pes1, gereg, gestfips, prcitshp,
+                pwsswgt)
+
+save(df_cps, file = "../02-data/CPS-nov16-for-MRP.Rdata")
+```
+
+```{r read-data-3}
+load("../02-data/CPS-nov16-for-MRP.Rdata")
+df_cps <- cpsDF; rm(cpsDF)
+
+df_cps %<>%
+    rename(eth = 1,
+           inc = 2,
+           age = 3,
+           fem = 4,
+           edu = 5,
+           sng = 6,
+           vot = 7,
+           reg = 8,
+           stt = 9,
+           ctz = 10,
+           weight = 11)
+```
+
+We then do bulk recoding on these variables, to reduce their number of categories:
+
+1. Ethnicity - reduce from 26 categories to just 3: White, African-American, and Other;
+2. Income - reduce from 16 categories to just 3: below 25,000, 25,000 - 60,000, and over 60,000;
+3. Age - reduce to 2 categories: 18 - 44, and 45 and over;
+4. Education - reduce from 15 categories to just 3: less than high school, some college, and college degree and above;
+5. Marital status - reduce to 2 categories: married (and living together as married), and single (including widowed, divorced);
+6. Citizenship status - reduce from 5 categories to just 2: citizen, and non-citizen
+
+```{r clean-data-2}
+df_cps %<>%
+    mutate(eth = case_when(eth == 1 ~ 0,
+                           eth == 2 ~ 1,
+                           eth >= 3 ~ 2,
+                           eth == -1 ~ NA_real_),
+           inc = case_when(inc == -1 ~ NA_real_,
+                           inc <= 7 ~ 0,
+                           inc >= 8 & inc <= 12 ~ 1,
+                           inc >= 13 ~ 2),
+           age = case_when(age <= 17 ~ NA_real_,
+                           age >= 18 & age <= 44 ~ 0,
+                           age >= 45 ~ 1),
+           fem = case_when(fem == -1 ~ NA_real_,
+                           fem == 1 ~ 0,
+                           fem == 2 ~ 1),
+           edu = case_when(edu == -1 ~ NA_real_,
+                           edu >= 31 & edu <= 39 ~ 0,
+                           edu == 40 ~ 1,
+                           edu >= 41 & edu <= 46 ~ 2),
+           sng = case_when(sng == -1 ~ NA_real_,
+                           sng <= 2 ~ 1,
+                           sng >= 3 ~ 2),
+           vot = as.character(vot),
+           vot = case_when(vot %in% c("No Response", "Refused",
+                                      "Don't Know", "Not in Universe") ~ NA_character_, # nolint
+                           vot == "Yes" ~ "1",
+                           vot == "No" ~ "0"),
+           vot = as.numeric(vot),
+           ctz = case_when(ctz == -1 ~ NA_real_,
+                           ctz %in% c(1, 2, 3, 4) ~ 1,
+                           ctz == 5 ~ 0))
+
+df_cps$stt <- as.character(df_cps$stt)
+for(i in 1:n.stt) {
+  df_cps$stt[df_cps$stt == state.label[i]] <- i
+}
+df_cps$stt <- as.numeric(df_cps$stt)
+```
+
+At this stage, we select only the rows that don't have any missings on the first 5 variables from the CPS, and where the respondent is a citizen of the United States (and, therefore, can vote in the elections).
+
+```{r subset-rows}
+ok <- apply(is.na(df_cps[, c(1:5)]), 1, sum) == 0 &
+  (df_cps$ctz == 1 | is.na(df_cps$ctz))
+df_cps <- df_cps[ok, ]
+rm(ok)
+```
+
+Finally, we subset only the variables needed for modeling.
+
+```{r select-columns}
+df_cps %<>%
+    dplyr::select(eth, inc, age, fem, edu, vot,
+                  stt, weight)
+```
+
+# Population cell counts
+
+This information is obtained from the American Community survey (ACS). I use here the 2013-2017 5-year ACS estimates for the 2016 election. Each ACS file is around 2-3 GB large which makes it impossible to add to the GitHub repository. I've done all the recoding on my computer, and have added only the finished data set in the respository.^[However, I've kept the code in this file, if you need to do the same analysis for your own purposes, and you download the ACS yourself. I use the `fread()` function from the `data.table` package because it's the fastest way to read such large files in memory.]
+
+As part of this code chunk, I also recode key variables, like ethnicity, income, age, and education to match the coding scheme used by the CPS.
+
+```{r prepare-raw-acs, eval=FALSE}
+df_a <- fread("../02-data/psam_pusa.csv",
+              select = c("ST", "RAC1P", "PINCP", "SCHL", "AGEP",
+                         "PWGTP"))
+df_b <- fread("../02-data/psam_pusb.csv",
+              select = c("ST", "RAC1P", "PINCP", "SCHL", "AGEP",
+                         "PWGTP"))
+df_c <- fread("../02-data/psam_pusc.csv",
+              select = c("ST", "RAC1P", "PINCP", "SCHL", "AGEP",
+                         "PWGTP"))
+df_d <- fread("../02-data/psam_pusd.csv",
+              select = c("ST", "RAC1P", "PINCP", "SCHL", "AGEP",
+                         "PWGTP"))
+
+df_acs16 <- rbind(df_a, df_b, df_c, df_d)
+rm(df_a, df_b, df_c, df_d)
+
+names(df_acs16) <- c("stt", "eth", "inc", "edu", "age", "fweight")
+
+df_acs16 %<>%
+    mutate(stt = case_match(stt,
+                            4 ~ 3, 5 ~ 4, 6 ~ 5, 8 ~ 6, 9 ~ 7, 10 ~ 8,
+                            11 ~ 9, 12 ~ 10, 13 ~ 11, 15 ~ 12, 16 ~ 13,
+                            17 ~ 14, 18 ~ 15, 19 ~ 16, 20 ~ 17, 21 ~ 18,
+                            22 ~ 19, 23 ~ 20, 24 ~ 21, 25 ~ 22, 26 ~ 23,
+                            27 ~ 24, 28 ~ 25, 29 ~ 26, 30 ~ 27, 31 ~ 28,
+                            32 ~ 29, 33 ~ 30, 34 ~ 31, 35 ~ 32, 36 ~ 33,
+                            37 ~ 34, 38 ~ 35, 39 ~ 36, 40 ~ 37, 41 ~ 38,
+                            42 ~ 39, 44 ~ 40, 45 ~ 41, 46 ~ 42, 47 ~ 43,
+                            48 ~ 44, 49 ~ 45, 50 ~ 46, 51 ~ 47, 53 ~ 48,
+                            54 ~ 49, 55 ~ 50, 56 ~ 51),
+           eth = case_when(eth == 1 ~ 0,
+                           eth == 2 ~ 1,
+                           eth >= 3 ~ 2),
+           inc = case_when(inc <= -1 ~ NA_real_,
+                           inc <= 24999 ~ 0,
+                           inc >= 25000 & inc <= 59999 ~ 1,
+                           inc >= 60000 ~ 2),
+           age = case_when(age <= 17 ~ NA_real_,
+                           age > 95 ~ NA_real_,
+                           age >= 18 & age <= 44 ~ 0,
+                           age >= 45 ~ 1),
+           edu = case_when(edu <= 17 ~ 0,
+                           edu %in% c(18, 19) ~ 1,
+                           edu %in% c(20:24) ~ 2)) %>%
+    dplyr::select(stt, eth, inc, age, edu, fweight) %>%
+    na.omit()
+
+saveRDS(df_acs16, file = "../02-data/df_acs16.rds")
+```
+
+```{r read-data-4}
+df_acs16 <- readRDS(file = "../02-data/df_acs16.rds")
+
+df_acs16 %>%
+    glimpse()
+```
+
+Notice how the ACS is essentially a "baby Census" - for every population socio-demographic breakdown in our data, it provides a count of how many people are expected to be in the population: `fweight` = frequency weight.
+
+# Run MRP
+
+This is done for (1) ethnicity, (2) income, (3) age, and (4) education. This automatically generates a data frame with all the possible permutations of the categories of state, ethnicity, income, age, and education.
+
+```{r mrp-prep-1}
+df_all <- as.data.frame(expand.grid(1:n.stt,
+                                    0:(n.eth - 1),
+                                    0:(n.inc - 1),
+                                    0:(n.age - 1),
+                                    0:(n.edu - 1)))
+
+df_all %<>%
+    rename(stt = 1,
+           eth = 2,
+           inc = 3,
+           age = 4,
+           edu = 5) %>%
+    unite("grp", stt:edu, sep = "_", remove = FALSE) %>%
+    mutate(ix = 1:n())
+
+# Do the same for the CPS data
+df_cps %<>%
+    relocate(stt) %>%
+    relocate(edu, .before = fem) %>%
+    unite("grp", stt:edu, sep = "_", remove = FALSE)
+```
+
+```{r design-correction}
+df_mr <- df_cps %>%
+    group_by(grp) %>%
+    summarise(n = n(),
+              ybar.wt = sum(vot * weight, na.rm = TRUE) / sum(weight, na.rm = TRUE), # nolint
+              des.eff.cell = 1 + var(weight / mean(weight, na.rm = TRUE),
+                                     na.rm = TRUE))
+```
+
+This last line in the code chunk above is where the correction for the design effect takes place. This design effect is the adjustment that needs to be made to the nominal sample size, so as to obtain the actual sample.
+
+```{r data-cleanup-1}
+df_temp <- left_join(df_all, df_mr,
+                     by = "grp") %>%
+    arrange(ix) %>%
+    mutate(n = if_else(is.na(n), 0, n)) # Empty cells
+
+vec_design_eff <- WMean(df_temp$des.eff.cell,
+                        df_temp$n,
+                        df_temp$n > 1)
+
+df_temp %<>%
+    mutate(n.eff = n / vec_design_eff,
+           ybar.wt = if_else(n.eff == 0, 0.5, ybar.wt),
+           success = ybar.wt * n.eff,
+           failure = (1 - ybar.wt) * n.eff)
+rm(vec_design_eff)
+```
+
+We also have to create a few additional predictors in the data. The final part of the code removes rows without data on success and failure (together, they comprise the dependent variable in our model).
+
+```{r data-cleanup-2}
+df_temp %<>%
+    mutate(z.eth = arm::rescale(eth),
+           z.inc = arm::rescale(inc),
+           z.age = arm::rescale(age),
+           z.edu = arm::rescale(edu))
+
+df_state %<>%
+    dplyr::select(state, z.income16, z.VEPtotal14,
+                  z.religsh, ballots16) %>%
+    rename(stt = 1)
+
+df_temp <- left_join(df_temp,
+                     dplyr::select(df_state, stt, z.income16, z.VEPtotal14,
+                                   z.religsh),
+                     by = "stt") %>%
+    filter(!is.na(success))
+```
+
+We are now ready to run the model.
+
+```{r mrp-estimate-1}
+model16 <- glmer(cbind(success, failure) ~ z.eth + z.VEPtotal14 +
+                   z.income16 + z.VEPtotal14 + z.religsh + z.edu +
+                   z.inc + z.age + (1 | stt) + (0 + z.eth | stt) +
+                   (1 | z.edu) + (0 + z.eth | z.edu),
+                 family = binomial(link = "logit"),
+                 data = df_temp,
+                 control = glmerControl(optCtrl = list(maxfun = 4000000),
+                                        optimizer = "bobyqa"))
+```
+
+Unfortunately, I could not add another pair of random effects: `(1 | z.age) + (0 + z.eth | z.age)`. This is because the model estimation produced convergence errors, with the message `boundary (singular) fit: see ?isSingular`.
+
+This message is usually an indication that the model is overfitted - that the random effects structure is too complex to be estimated by the data we have. This is why I removed that random effect. I had already removed the correlation between random intercepts and random slopes so as to help with the estimation process, for the very same reason.^[Try adding back the random effect for income: `(1 | z.inc) + (0 + z.inc | stt)`, and see how in changes the outcome of the model.]
+
+```{r mrp-estimate-2}
+df_temp$turn2016.M <- fitted(model16)
+```
+
+# Post-stratification stage
+
+The code below will take some time to run, because this data frame is very large. Eventually it will finish, though, as the procedure is very simple.
+
+```{r post-strat-1}
+df_acs16 %<>%
+    unite("grp", stt:edu, sep = "_", remove = FALSE)
+
+df_pop <- df_acs16 %>%
+    group_by(grp) %>%
+    summarise(pop2016 = sum(fweight, na.rm = TRUE))
+
+df_temp <- left_join(df_temp, df_pop, by = "grp") %>%
+    arrange(ix)
+```
+
+Finally, we add up and alter based on actual turnout estimates.^[The warnings are actually coming from groups that are too small.]
+
+```{r post-strat-2}
+df_temp$turn2016 <- NA
+
+for (i in 1:n.stt) {
+  ok <- df_temp$stt == i
+  df_temp$turn2016[ok] <- CorrectWeighted(a = df_temp$turn2016.M[ok],
+                                          w = df_temp$pop2016[ok],
+                                          x = df_state[df_state$stt == i,
+                                                       "ballots16"])$corrected
+  }
+```
+
+```{r post-strat-3}
+save(df_temp,
+     file = "../04-output/Turnout-2016-20190808.RData")
+```
+
+# Plotting
+
+Largely speaking, this is the most uneventful part of the whole process. All I'm doing is plotting the estimates I've obtained. However, you could think of all sorts of interesting analyses that you could do once you have estimated turnout per subgroup, e.g. explain why variation exists in lower-income citizens' turnout across different states, or even across finer electoral divisions, such as electoral districts (if sufficient data existed to be able to do this estimation).
+
+Let's say I want to look at lower income voters' turnout across the 50 US states. The information is presented at a very low level of aggregation, so I have to aggregate it up.^[Here we also remove any turnout estimate that is implausibly large (over 90%).]
+
+```{r plot-aggregate-1}
+df_plot <- df_temp %>%
+  mutate(voted = pop2016 * turn2016) %>%
+  group_by(stt, inc) %>%
+  summarise(pop = sum(pop2016, na.rm =  TRUE),
+            voted = sum(voted, na.rm = TRUE)) %>%
+  mutate(turnout = voted / pop)
+
+# Assign state labels
+df_plot %<>%
+    mutate(stt.abb = dplyr::recode(stt, !!!state.label)) %>%
+    filter(turnout <= 0.9)
+```
+
+```{r plot-1}
+#| fig-height: 6
+#| fig-width: 12
+#| dpi: 144
+
+df_plot %>%
+    na.omit() %>%
+    mutate(stt.abb = factor(stt.abb, levels = stt.abb[inc == 0])) %>%
+    mutate(inc = case_when(inc == 0 ~ "0-25k",
+                           inc == 1 ~ "25-60k",
+                           inc == 2 ~ "60k +"),
+           inc = factor(inc, levels = c("0-25k", "25-60k", "60k +"))) %>%
+    ggplot(aes(x = reorder(stt.abb, -turnout),
+               y = turnout)) +
+    geom_point(size = 4) +
+    theme_clean() +
+    facet_wrap(. ~ inc, ncol = 1) +
+    labs(x = "State",
+         y = "Turnout") +
+    scale_y_continuous(labels = percent_format())
+```
+
+You can generate a similar plot, but broken down based on age categories as well.
+
+```{r plot-aggregate-2}
+df_plot <- df_temp %>%
+    mutate(voted = pop2016 * turn2016) %>%
+    group_by(stt, inc, age) %>%
+    summarise(pop = sum(pop2016, na.rm =  TRUE),
+              voted = sum(voted, na.rm = TRUE)) %>%
+    mutate(turnout = voted / pop)
+
+# Assign state labels
+df_plot %<>%
+    mutate(stt.abb = dplyr::recode(stt, !!!state.label)) %>%
+    filter(turnout <= 0.9)
+```
+
+```{r plot-2}
+#| fig-height: 6
+#| fig-width: 18
+#| dpi: 144
+
+df_plot %>%
+    ungroup() %>%
+    na.omit() %>%
+    mutate(stt.abb = factor(stt.abb, levels=stt.abb[inc == 0 & age == 0])) %>%
+    mutate(inc = case_when(inc == 0 ~ "0-25k",
+                           inc == 1 ~ "25-60k",
+                           inc == 2 ~ "60k +"),
+           age = case_when(age == 0 ~ "18-44",
+                           age == 1 ~ "45 +"),
+           inc = factor(inc, levels = c("0-25k", "25-60k", "60k +")),
+           age = factor(age, levels = c("18-44", "45 +"))) %>%
+    ggplot(aes(x = reorder(stt.abb, -turnout),
+               y = turnout)) +
+    geom_point(size = 4) +
+    theme_clean() +
+    facet_wrap(inc ~ age, ncol = 2, nrow = 3) +
+    labs(x = "State",
+         y = "Turnout") +
+    scale_y_continuous(labels = percent_format())
+```
+
+**Task** (time consuming): Adapt my code here to exclude age as a characteristic. This will involve removing it from the CPS data, disregarding it in the ACS data, as well as altering the model specification. Generate new predicted values for turnout.
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
