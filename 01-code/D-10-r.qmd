@@ -1,0 +1,698 @@
+---
+title: "Practice Code: Day 10"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "August 9, 2019"
+bibliography: ../references.bib
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+---
+
+# Introduction
+
+The code represents a slightly modified version of an analysis prepared by the authors of the `HSAR` package to demonstrate some of the features of their package. I am grateful to the authors for making the script available online.^[As of January 2022, the `HSAR` package is no longer hosted on CRAN. This means that you have to install the package manually, from the archived repository.]
+
+```{r load-packages-1}
+library(pacman)
+p_load(tidyverse, sf, spdep, spatialreg, ggthemes, broom, knitr,
+       arm, broom.mixed, HLMdiag, DHARMa, foreign, ggrepel,
+       kableExtra, magrittr, devtools)
+```
+
+```{r load-packages-2, eval=FALSE}
+install_version("HSAR", version = "0.5.1", repos = "http://cran.us.r-project.org")
+```
+
+```{r load-packages-3}
+library(HSAR)
+```
+
+# Hierarchical spatial analysis
+
+In light of the shorter nature of today's course, this will also be a slightly shorter script than usual. We rely today on the functions available in the `HSAR` package, designed for hierarchical spatial analysis. One of the main benefits of relying on this package is that it contains autonomous functions to handle the estimation, with no need to install some additional software for Bayesian estimation, like **Stan**, **JAGS**, or **WinBUGS**.
+
+## Data
+
+The data comes also from the package, and refers to land prices in Beijing (to keep the connection going with the first article in the mandatory reading list). Though some social science examples would have likely been more interesting, they are also typically of larger size in terms of data, which would have made estimation a bit more time consuming.
+
+In our sample we have information on prices on land parcels leased to real estate developers in Beijing, between 2003 and 2009. After deleting some missing data, we have information on 1,117 parcels:
+
+1. `obs`: unique ID for each land parcel;
+2. `lnprice`: natural logarithm of the leasing price per square meter (in RMB, Chinese yuan);
+3. `dsubway`: log distance from each parcel to nearest railway station (in meters);
+4. `dele`: log distance from each parcel to nearest elementary school (in meters);
+5. `dpark`: log distance from each parcel to nearest park area (in meters);
+6. `lnarea`: natural logarithm of parcel size (in square meters); 
+7. `lndcbd`: natural logarithm of the distance of each parcel to the central business district in Beijing (in meters);
+8. `year`: year when the parcel was leased, in unit increases starting from 0 (2003), 1 (2004), ...;
+9. `popden`: population density in each district in which the land parcel is situated (in 1000 persons per sq. kilometer units);
+10. `crimerate`: number of serious crimes reported in each district, per 1000 persons;
+11. `district.id`: the ID of the district where each parcel is located.
+
+```{r load-data-1}
+data("landprice")
+
+landprice %>%
+  glimpse()
+```
+
+The data contains land parcels located in `r length(unique(landprice$district.id))` districts across the city.
+
+## Data preparation
+
+The first steps of the analysis will be to get a matrix of distances between geographical units, which could then be incorporated into the estimation. We would have to do this even if we analyzed individuals dispersed across a map, e.g. needing to calculate their distance to the nearest hospital, or police station.
+
+To do this, we will need a specialized package for handling GIS data in `R`, as well as some shapefiles with the geographic units we are interested in. If working with individual-level data, then we would also need a data set with the coordinates of these individuals on the map.
+
+In the case of the land price data, both these data sets are provided in the `HSAR` package.
+
+```{r load-data-2}
+data("Beijingdistricts")
+data("landSPDF")
+```
+
+```{r glimpse-data-1}
+summary(Beijingdistricts)
+```
+
+```{r glimpse-data-2}
+landSPDF %>%
+    glimpse()
+```
+
+What we have is a data set of spatial polygons (the contours of the districts), and a data set of points - most likely these are the centroids of the land parcels in question. Before being able to map them, I have to convert them into the format that the `sf` package can read.
+
+```{r convert-sf}
+Beijingdistricts <- st_as_sf(Beijingdistricts)
+landSPDF <- st_as_sf(landSPDF)
+```
+
+In recent years, `ggplot2` has been able to plot spatial data frames as well, with the help of the `geom_sf()` function.
+
+```{r plot-districts-1}
+#| fig-height: 12
+#| fig-width: 12
+#| dpi: 144
+
+ggplot(data = Beijingdistricts) +
+    geom_sf() +
+    theme_minimal() +
+    labs(x = "Longitude",
+         y = "Latitute",
+         title = "Beijing districts")
+```
+
+Overlay the parcel location on the district map.
+
+```{r plot-districts-2}
+#| fig-height: 12
+#| fig-width: 12
+#| dpi: 144
+
+ggplot(data = Beijingdistricts) +
+    geom_sf() +
+    geom_sf(data = landSPDF) +
+    theme_minimal() +
+    labs(x = "Longitude",
+         y = "Latitute",
+         title = "Beijing districts")
+```
+
+## Random effects matrix
+
+We start by defining the random effects matrix that our model will use. We first order parcels based on the district where they are located in.
+
+```{r get-data-characteristics}
+df_model <- landprice %>%
+    arrange(district.id)
+
+# Get the number of parcels in each district of the city
+U_num <- df_model %>% 
+    group_by(district.id) %>% 
+    summarise(N = n()) %>%
+    pull(N)
+
+# Total number of districts (which will also be the number of random
+# effects in the model)
+U_total <- length(unique(df_model$district.id))
+# IDs for the random effects
+U_id <- rep(c(1:U_total), U_num)
+
+# Sample size
+n <- nrow(df_model)
+
+# Matrix of location of parcels. Each parcel can uniquely be located in one
+# district. Once a parcel has been placed in one district, the other cells on
+# the same line will take the value of 0.
+Delta <- matrix(0, nrow = n, ncol = U_total)
+
+for(i in 1:U_total) {
+  Delta[U_id == i, i] <- 1
+}
+rm(i)
+
+# Constrain Delta to be a sparse numeric matrix (only a few cells of the entire
+# matrix actually contain valid values).
+Delta <- as(Delta, "dgCMatrix")
+```
+
+## Spatial weights
+
+We then extract the district level spatial weights. There's no dedicated function for this in the `sf` package, so I switched to the `poly2nd()` function from the `spdep` package. The function essentially computes a list of the neighbors of each district.^[I am using the "Queen's rule": so as long as there at least one point in common between the districts, this will consider them as neighbors.] With this list of neighbors, the `nb2mat()` function produces the spatial weights matrix for the neighbors.^[The `W` argument in the `nb2mat()` function means that the matrix is row standardized, which means all weights on a row sum up to 1.]
+
+```{r get-spatial-weights-neighbors}
+ngbrs <- poly2nb(Beijingdistricts,
+                 queen = TRUE)
+
+mat.list <- nb2mat(ngbrs,
+                   style = "W")
+# Again, convert it to a sparse matrix - this just saves memory for R.
+M <- as(mat.list, "dgCMatrix")
+```
+
+We now have to compute the neighborhood matrix between parcels. The function `dnearneigh()` takes in the parcel data set (spatial points), and asks for a minimum and a maximum distance. Any parcel that is between 0 and 2.5 KM has been considered here a neighbor.^[No particular reason for why 2.5 was selected.] This again produces a list of lists, where for each point on the map their neighbors are listed.
+
+Based on this list of neighbors, and on the coordinates data for the parcels, the function `nbdists()` computes the Euclidean distance between a point and its neighbors.
+
+```{r compute-parcel-distances}
+nb.25 <- dnearneigh(landSPDF, d1 = 0, d2 = 2500)
+length(nb.25)
+
+dist.25 <- nbdists(nb = nb.25,
+                   coords = landSPDF$geometry)
+```
+
+We now have to come up with a function that assigns weights to these neighbors, depending on close they are to the actual observation.^[This is called a *decay* function.] Try playing around with different values for x (between 0 and 2500), to see how the function behaves.
+
+```{r get-spatial-weights-parcels}
+dist.25 <- lapply(dist.25, 
+                  function(x) exp(-0.5 * (x / 2500)^1.5))
+
+# We now finally have all the information to generate the spatial weights
+# matrix for our parcels.
+mat.25 <- nb2mat(nb.25,
+                 glist = dist.25,
+                 style = "W")
+
+W <- as(mat.25, "dgCMatrix")
+```
+
+## Basic model
+
+We define the specification for the model, as well as get coefficients from an OLS, which we then use as priors in the Bayesian model.^[**Task**: For this specification, and the two below it, please center the predictors, and then re-estimate the model.]
+
+```{r get-model-characteristics-1}
+# Formula for model
+mod.form.1 <- lnprice ~ lnarea + as.factor(year)
+# Estimate a quick linear model, and use the coefficients as priors for the
+# Bayesian model below.
+betas <-  coef(lm(formula = mod.form.1,
+                  data = landprice))
+
+# Other priors for the model
+pars = list(rho = 0.5,     # Assumes a spatial autoregressive correlation of 0.5
+            lambda = 0.5,  # Assumes a correlation of 0.5 for district-level REs
+            sigma2e = 2.0, # Assumes the lower-level variance parameter
+            sigma2u = 2.0, # Assumes the higher-level variance parameter
+            betas = betas)
+```
+
+```{r estimate-model-1}
+mod.1 <- hsar(mod.form.1,
+              data = df_model,
+              W = W,
+              M = M,
+              Delta = Delta,
+              burnin = 5000,
+              Nsim = 10000,
+              thinning = 1,
+              parameters.start = pars)
+summary(mod.1)
+rm(mod.form.1, betas, pars, mod.1)
+```
+
+## Extended model: distance predictors
+
+```{r get-model-characteristics-2}
+mod.form.2 <- lnprice ~ lnarea + dsubway + dele + dpark +
+  lndcbd + as.factor(year)
+
+betas <-  coef(lm(formula = mod.form.2,
+                  data = landprice))
+
+pars = list(rho = 0.5,
+            lambda = 0.5,
+            sigma2e = 2.0,
+            sigma2u = 2.0,
+            betas = betas)
+```
+
+```{r estimate-model-2}
+mod.2 <- hsar(mod.form.2,
+              data = df_model,
+              W = W,
+              M = M,
+              Delta = Delta,
+              burnin = 5000,
+              Nsim = 10000,
+              thinning = 1,
+              parameters.start = pars)
+summary(mod.2)
+
+rm(mod.form.2, betas, pars, mod.2)
+```
+
+## Extended model: distance and district-level predictors
+
+```{r get-model-characteristics-3}
+mod.form.3 <- lnprice ~ lnarea + dsubway + dele + dpark +
+  lndcbd + popden + crimerate + as.factor(year)
+
+betas <-  coef(lm(formula = mod.form.3,
+                  data = landprice))
+
+pars = list(rho = 0.5,
+            lambda = 0.5,
+            sigma2e = 2.0,
+            sigma2u = 2.0,
+            betas = betas)
+```
+
+```{r estimate-model-3}
+mod.3 <- hsar(mod.form.3,
+              data = df_model,
+              W = W,
+              M = M,
+              Delta = Delta,
+              burnin = 5000,
+              Nsim = 10000,
+              thinning = 1,
+              parameters.start = pars)
+summary(mod.3)
+
+rm(mod.form.3, betas, pars)
+```
+
+```{r display-results, results='asis'}
+cbind(as.numeric(mod.3$Mbetas),
+      as.numeric(mod.3$SDbetas),
+      as.character(mod.3$labels)) %>%
+  as.data.frame() %>%
+  rename(beta = 1,
+         se = 2,
+         term = 3) %>%
+  mutate(beta = as.numeric(beta),
+         se = as.numeric(se)) %>%
+  relocate(term) %>%
+  kable(digits = 3,
+        caption = "Estimates spatial HLM",
+        caption.above = TRUE,
+        col.names = c("Term", "Beta", "SE")) %>%
+  kable_styling(full_width = FALSE)
+```
+
+# MLM assumptions
+
+I could not identify, in my searches so far, a convenient checklist for you to be able to follow step by step when running your own specifications. The closest things that are an approximation to a checklist are:
+
+1. A blog post (with code) by Michael Palmeri: [https://ademos.people.uic.edu/Chapter18.html](https://ademos.people.uic.edu/Chapter18.html)
+2. Two chapters (2 and 3) of Adam Loy's dissertation at Iowa State University [@loy_diagnostics_2013], which deals with model assumptions in multilevel: [https://dr.lib.iastate.edu/entities/publication/bcb65da8-a293-4928-b33c-1257ce9dc253](https://dr.lib.iastate.edu/entities/publication/bcb65da8-a293-4928-b33c-1257ce9dc253)
+
+Let's start again from the tobacco lobby contributions to US legislators example from last Friday.
+
+```{r load-data-3}
+df_tobacco <- read.spss(file = "../02-data/03-contributions.sav",
+                        to.data.frame = TRUE,
+                        use.value.labels = FALSE)
+```
+
+## Initial model
+
+Though we have gone through a systematic strategy last Friday on how to build up the models, and test whether a specification fits the data better than the previous one, today we have to start with the final specification we ran, and assess its suitability.
+
+```{r center-l1}
+df_tobacco %<>%
+    group_by(state) %>%
+    mutate(moneyCWC = arm::rescale(money1000),
+           partyCWC = arm::rescale(party),
+           houseCWC = arm::rescale(house))
+```
+
+```{r center-l2}
+df_agg <- df_tobacco %>%
+    group_by(state) %>%
+    summarise(acres = mean(acres, na.rm = TRUE)) %>%
+    mutate(acresCGM = arm::rescale(acres)) %>%
+    dplyr::select(-acres)
+
+df_tobacco <- left_join(df_tobacco, df_agg, by = c("state"))
+rm(df_agg)
+```
+
+```{r run-initial-model}
+mlm.4 <- lmer(pct100 ~ 1 + moneyCWC + partyCWC + houseCWC +
+                acresCGM + partyCWC * acresCGM +
+                (1 + partyCWC | state),
+              data = df_tobacco)
+summary(mlm.4)
+```
+
+Before we go with this specification, try to see how `acres` is distributed. How does it look? What can be done about this?
+
+```{r center-more-l2}
+df_tobacco$logacres <- log(1 + df_tobacco$acres)
+df_agg <- df_tobacco %>%
+    group_by(state) %>%
+    summarise(logacres = mean(logacres, na.rm = TRUE)) %>%
+    mutate(logacresCGM = arm::rescale(logacres)) %>%
+    dplyr::select(-logacres)
+
+df_tobacco <- left_join(df_tobacco, df_agg, by = c("state"))
+rm(df_agg)
+```
+
+```{r run-corrected-model}
+mlm.4 <- lmer(pct100 ~ 1 + moneyCWC + partyCWC + houseCWC +
+                logacresCGM + partyCWC * logacresCGM +
+                (1 + partyCWC | state),
+              na.action = na.omit,
+              data = df_tobacco)
+summary(mlm.4)
+```
+
+## L1 residuals
+
+Start from examining Level-1 residuals. To obtain a set of residuals that are not influenced by residuals at other levels of the hierarchy, you can specify that these be "least squares" residuals (obtained by running the model separately in each group).
+
+However, these would not be so useful for us here, since our group sizes are quite small in a substantial share of the level-2 units (US states). So I ask for the standard, Empirical Bayes, residuals (and also specify that they be standardized already).
+
+```{r l1-residuals}
+df_residuals <- hlm_resid(mlm.4,
+                          level = 1,
+                          standardize = TRUE,
+                          include.ls = FALSE)
+```
+
+### Linearity
+
+With these, we first look at a plot of residuals vs. fitted values.
+
+```{r linearity-1}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(x = `.fitted`,
+           y = `.std.resid`)) +
+  geom_point() +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_smooth(method = "loess",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#D55E00") +
+  theme_clean()
+```
+
+We should then also examine scatterplots of the residuals against the L1 predictors.
+
+```{r linearity-2}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(x = moneyCWC,
+           y = `.std.resid`)) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_smooth(method = "loess",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#D55E00") +
+  geom_point() +
+  theme_clean()
+```
+
+```{r linearity-3}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(x = houseCWC,
+           y = `.std.resid`)) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_smooth(method = "loess",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#D55E00") +
+  geom_point() +
+  theme_clean()
+```
+
+```{r linearity-4}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(x = partyCWC,
+           y = `.std.resid`)) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_smooth(method = "loess",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#D55E00") +
+  geom_point() +
+  theme_clean()
+```
+
+### Homogeneity of variances across groups
+
+You can start here as well by engaging in a few graphical examinations.
+
+```{r heteroskedasticity-1}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+df_residuals <- hlm_resid(mlm.4,
+                          level = 1,
+                          standardize = "semi",
+                          include.ls = FALSE)
+
+ggplot(data = df_residuals,
+       aes(x = moneyCWC,
+           y = `.resid`)) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_point() +
+  theme_clean() +
+  labs(y = "Semi-standardized residuals")
+```
+
+```{r heteroskedasticity-2}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(x = houseCWC,
+           y = `.resid`)) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_point() +
+  theme_clean() +
+  labs(y = "Semi-standardized residuals")
+```
+
+```{r heteroskedasticity-3}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(x = partyCWC,
+           y = `.resid`)) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              linewidth = 1.5,
+              color = "#0072B2") +
+  geom_point() +
+  theme_clean() +
+  labs(y = "Semi-standardized residuals")
+```
+
+### Normality of errors
+
+```{r normality-1}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(sample = `.resid`)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_clean()
+```
+
+### Problematic cases
+
+What are the cases that seem most problematic after this round of checks?
+
+```{r problems-1, results='asis'}
+df_residuals %>%
+    filter(`.resid` > 35 | `.resid` < -35) %>%
+    dplyr::select(state, pct100, moneyCWC, partyCWC, houseCWC, logacresCGM) %>%
+    kable(digits = 2,
+          caption = "Problematic cases based on L1 residuals inspection",
+          caption.above = TRUE) %>%
+    kable_styling(full_width = TRUE)
+```
+
+## L2 residuals
+
+We can do the same types of plots for the Level 2 residuals.
+
+```{r l2-residuals}
+df_residuals <- hlm_resid(mlm.4,
+                          level = "state")
+df_residuals %<>%
+    mutate(state = str_trim(state))
+```
+
+### Normality of errors
+
+We try to find residuals that are outliers.
+
+```{r normality-2}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(sample = `.ranef.intercept`)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_clean()
+```
+
+```{r normality-3}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+ggplot(data = df_residuals,
+       aes(sample = `.ranef.party_cwc`)) +
+  geom_qq() +
+  geom_qq_line() +
+  theme_clean()
+```
+
+I don't want to make this code file unnecessarily long, so I'll stop here. In a standard analysis for your own work, though, you would go through the same steps as for Level 1 residuals:
+
+1. Linearity
+2. Constant variance of residuals
+
+You would use the same kinds of plots as in the previous subsection, but using L2 predictors.
+
+## Analysis of influence
+
+### Estimates
+
+We can use two measures here: Cook's *d*, and `MDFFITS` values. "The difference between the two statistics is that Cook's distance scales the change in the parameter estimates by the estimated covariance matrix of the original parameter estimates, while `MDFFITS` is scaled by the estimated covariance matrix of the deletion estimates. This means that computation of Cook's distance only requires the covariance from the original fitted model while computation of `MDFFITS` requires the covariance structure to be reestimated in the absence of the *i*th unit and the inverse to be recalculated." [@loy_diagnostics_2013, p. 51]
+
+Higher values denote a larger degree of influence. If we want these for L1 observations as well, we would just set `group = NULL` in the `cooks.distance()` and `mdffits()` functions below.
+
+```{r influence-estimates-1}
+cooksd.mlm <- cooks.distance(mlm.4,
+                             level = "state",
+                             include.attr = TRUE)
+mdffits.mlm <- mdffits(mlm.4,
+                       level = "state")
+```
+
+```{r influence-estimates-2}
+#| fig-height: 4
+#| fig-width: 5
+#| dpi: 144
+
+dotplot_diag(x = cooksd.mlm$cooksd,
+             cutoff = "internal",
+             name = "cooks.distance") +
+  labs(y = "Cook's distance",
+       x = "State") +
+  theme_clean()
+```
+
+We can examine, for example, how coefficients would change (these would not be new coefficients) if the state would be excluded.
+
+```{r influence-estimates-3, results='asis'}
+cooksd.mlm %>%
+  kable(digits = 2) %>%
+  kable_styling(full_width = TRUE)
+```
+
+### Precision (of estimates)
+
+We have 2 measures here as well: `COVTRACE` and `COVRATIO`. Both statistics compare the covariance matrices of $\hat{\beta}$, where $\hat{\beta}$ is estimated with and without unit *i*. Taking the covariance matrix of $\hat{\beta}$ with unit *i* as the baseline, `COVTRACE` compares the ratio of the two matrices to the $p \times p$ identity matrix, which has a trace of $p$. `COVRATIO` directly compares the volume of the matrices via their determinants. In the case that unit *i* is not influential, the covariance trace will be close to zero, while the covariance ratio is close to one.
+
+```{r influence-precision-1}
+covratio.mlm4 <- covratio(mlm.4, level = "state")
+covtrace.mlm.4 <- covtrace(mlm.4, level = "state")
+```
+
+## Examining variance components
+
+```{r variance-components}
+RVC.mlm4 <- rvc(mlm.4,
+                level = "state")
+```
+
+## Leverage for fitted values
+
+```{r leverage-fitted}
+leverage_mlm4 <- leverage(mlm.4,
+                          level = "state")
+```
+
+Here you would need to plot each of the columns, and examine cases with large leverage values.
+
+# Package versions
+
+Package versions used in this script.
+
+```{r package-versions}
+sessionInfo()
+```
