@@ -1,0 +1,87 @@
+\documentclass[12pt,english]{article}
+\usepackage[usenames, dvipsnames]{xcolor}
+\usepackage[top=2cm, bottom=2cm, left=2.5cm, right=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{inputenc}
+\usepackage{parskip}
+\setlength{\parindent}{0pt}
+\usepackage{amsmath}
+\usepackage{caption}
+\usepackage{url}
+\usepackage[bookmarksnumbered]{hyperref}
+\usepackage{babel}
+\usepackage{graphicx}
+\usepackage{CormorantGaramond}
+\usepackage{dcolumn}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{titlesec}
+\titleformat{\section}{\large\bfseries}{\thesection}{0.4em}{}
+\titleformat{\subsection}{\normalfont\bfseries}{\thesubsection}{0.2em}{}
+\usepackage{booktabs}
+\setlength{\heavyrulewidth}{0.2em}
+\usepackage{apacite}
+\bibliographystyle{apacite}
+\makeatletter
+\renewcommand{\maketitle}{
+  \begin{flushleft}
+    {\huge\@title}\\
+    \vspace{10pt}
+    {\large\@author}\\
+    {\@date}
+    \vspace{40pt}
+  \end{flushleft}
+}
+\makeatother
+\usepackage{authblk}
+\title{\textsc{Codebook CSES (waves 1--4)}}
+\author{Constantin Manuel Bosancianu}
+\affil{WZB Berlin Social Science Center \\ \textit{Institutions and Political Inequality}}
+\date{July 16, 2019}
+\begin{document}
+\maketitle
+
+The data comes from waves 1-4 of the \textit{Comparative Study of Electoral Systems}. The data has been cleaned to the point where it is almost ready to use in statistical specifications. Only some of the variables have been used in the models presented in the course. The rest are made available to the participants for the purposes of exploration.
+
+The following variables measured at the individual-level can be found in the data:
+
+\begin{enumerate}
+  \item \texttt{cnt.year}: unique indicator for country-year;
+  \item \texttt{country}: full name of country;
+  \item \texttt{year}: year of the survey;
+  \item \texttt{poleff}: average of 2 items measuring political efficacy---higher values denote a greater sense of political efficacy;\footnote{First item: ``Who is in power can make a big difference'' (agree--disagree). Second item: ``Who people vote for makes a big difference''.}
+  \item \texttt{male}: gender (1=man; 0=woman);
+  \item \texttt{age}: age of respondent, measured in years;
+  \item \texttt{educat}: highest completed educational level (0 = no education; 1 = early childhood education; 2 = primary school; 3 = lower secondary; 4 = upper secondary; 5 = post-secondary, non-tertiary; 6 = short-cycle tertiary; 7 = bachelor or equivalent; 8 = master or equivalent; 9 = doctoral or equivalent);
+  \item \texttt{unmemb}: R. is a member of a trade union (1 = yes; 0 = no);
+  \item \texttt{income}: country-year specific income quintile in which R. is situated (0=bottom 20\%; \dots; 4=top 20\%);  
+  \item \texttt{relatt}: R's attendance at religious services apart from special occasions (weddings, funerals) (0 = never; 1 = once a year; 2=2-11 times a year; 3=once a month; 4=2 or more times a month; 5=once a week or more often);
+  \item \texttt{urban}: place of residence of respondent (0=village; 1=small or mid-size town; 2=suburbs of large town or city; 3=large town or city);
+  \item \texttt{lrself}: self-placement on a Left--Right axis (0=Left; \dots; 10=Right);
+  \item \texttt{turnout}: cast a ballot in the most recent legislative election, or intends to cast a ballot in the upcoming legislative election (1 = yes; 0 = no);
+  \item \texttt{polinfo}: count of correct answers to a set of political information items;
+  \item \texttt{wave}: wave of the CSES.
+\end{enumerate}
+
+The data set also contains a host of country-level indicators:
+
+\begin{enumerate}
+  \item \texttt{gini10}: net Gini value, obtained from Frederick Solt's \textit{SWIID} data, version 8.1;\footnote{Value is expressed in 10-point units. Higher values denote more inequality.}
+  \item \texttt{ti\_cpi}: Transparency International's \textit{Corruption Perceptions Index} (obtained from then January 2019 version of the \textit{Quality of Governance} data)---higher values denote less corruption;
+  \item \texttt{unDens}: union density (obtained from Jelle Visser's \textit{ICTWSS} data, version 6.0, from June 2019);
+  \item \texttt{pub\_finance}: extent to which public funding is available for campaigns for national office (higher values denote greater availability of public funding) (obtained from \texttt{V-DEM} data, version 9, original variable name is \texttt{v2elpubfin\_mean});
+  \item \texttt{leg\_corrupt}: extent to which members of the legislature abuse their position for financial gain (higher values denote a greater degree of honesty) (obtained from \texttt{V-DEM} data, version 9, original variable name is \texttt{v2lgcrrpt\_mean});
+  \item \texttt{pol\_power}: power is distributed in society according to socio-economic position (higher values denote a greater degree of equality) (obtained from \texttt{V-DEM} data, version 9, original variable name is \texttt{v2pepwrses});
+  \item \texttt{corr\_ind}: index of how pervasive political corruption is in country (interval measure, from low to high: 0--1) (obtained from \texttt{V-DEM} data, version 9, original variable name is \texttt{v2x\_corr});
+  \item \texttt{account\_ind}: index of the extent to which the ideal of government accountability is achieved (interval measure, from low to high: 0--1) (obtained from \texttt{V-DEM} data, version 9, original variable name is \texttt{v2x\_accountability});
+  \item \texttt{div\_ctrl}: index of the extent to which the executive and legislature are controlled by different political parties (interval, with negative values denoting unified party control, and positive values denoting divided party control) (obtained from \texttt{V-DEM} data, version 9, original variable name is \texttt{v2x\_divparctrl});
+  \item \texttt{mdmh}: mean district magnitude for elections to the lower chamber of the legislature (obtained from the \textit{Database of Political Institutions}, February 2018 version);
+  \item \texttt{pr}: proportional electoral system (1 = yes; 0 = no) (obtained from the \textit{Database of Political Institutions}, February 2018 version);
+  \item \texttt{parlam}: parliamentary regime (1 = parliamentary, assembly-elected president; 0 = presidential) (obtained from the \textit{Database of Political Institutions}, February 2018 version);
+  \item \texttt{wbgi\_gee}: \textit{World Bank}'s Government Effectiveness Index (from the ``Governance Indicators'' series) (obtained from then January 2019 version of the \textit{Quality of Governance} data);
+  \item \texttt{enep}: effective number of parties (obtained from then January 2019 version of the \textit{Quality of Governance} data, which itself sources this indicator from the Bormann and Golder \textit{Democratic Systems Around the World 1946--2011} data);
+  \item \texttt{gdp}: GDP per capita, PPP (expressed in current international USD) (obtained from \textit{World Bank} data);
+  \item \texttt{comp}: compulsory voting laws are in place in the country (obtained from \texttt{IDEA} data on turnout).
+\end{enumerate}
+
+\end{document}

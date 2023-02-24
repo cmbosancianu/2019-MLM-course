@@ -1,0 +1,417 @@
+\documentclass[12pt,english]{article}
+\usepackage[usenames, dvipsnames]{xcolor}
+\usepackage[top=2cm, bottom=2cm, left=2.5cm, right=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{inputenc}
+\usepackage{caption}
+\usepackage{booktabs}
+\setlength{\heavyrulewidth}{0.2em}
+\usepackage{graphicx}
+\usepackage{parskip}
+\setlength{\parindent}{0pt}
+\usepackage{amsmath}
+\usepackage{url}
+\usepackage[bookmarksnumbered]{hyperref}
+\hypersetup{colorlinks, citecolor=RoyalBlue, linkcolor=RubineRed, urlcolor=MidnightBlue}
+\hypersetup{pdfauthor={Constantin Manuel Bosancianu},
+pdftitle={Two-level MLM},
+pdfsubject={Two-level MLM specifications},
+pdfkeywords={SSMT, 2019, MLM, tutorial, interpretation}}
+\usepackage{babel}
+\usepackage{CormorantGaramond}
+\usepackage{dcolumn}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{titlesec}
+\titleformat{\section}{\large\bfseries}{\thesection}{0.4em}{}
+\titleformat{\subsection}{\normalfont\bfseries}{\thesubsection}{0.2em}{}
+\usepackage{apacite}
+\bibliographystyle{apacite}
+\makeatletter
+\renewcommand{\maketitle}{
+  \begin{flushleft}
+    {\huge\@title}\\
+    \vspace{10pt}
+    {\large\@author}\\
+    {\@date}
+    \vspace{40pt}
+  \end{flushleft}
+}
+\makeatother
+\usepackage{afterpage}
+% End of huxtable requirements
+\usepackage{authblk}
+\title{\textsc{Two-level MLM}}
+\author{Constantin Manuel Bosancianu\footnote{You can reach me at \href{mailto:bosancianu@icloud.com}{bosancianu@icloud.com}. If you spot any mistakes I'd be grateful if you sent me an email pointing it out; I'll update the document and credit the help offered.}}
+\affil{WZB Berlin Social Science Center \\ \textit{Institutions and Political Inequality}}
+\date{\today}
+\begin{document}
+\maketitle
+
+The current tutorial goes through the steps of running in R a standard two-level mixed-effects model. The data set used throughout is the one you are also working on for your assignment: the 6th wave of the European Social Survey, with a sample of 23 countries and a bit over 44,000 respondents.
+
+First, read the data in \texttt{R} (please replace the working directory with the folder path on your machine). You can get a rough idea of what the variables in the data set measure, and how they are coded, by looking at the codebook for the ESS data, which has also been uploaded here.
+
+<<setup, include = FALSE, warning=FALSE, message=FALSE, comment=NA, results='hide', echo=FALSE>>=
+# Setup chunk
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE,
+                      comment = NA)
+
+library(pacman)
+p_load(tidyverse, arm, broom.mixed, knitr, kableExtra, magrittr,
+       texreg, effects, ggthemes)
+
+# Define the color scheme for all the plots in the paper
+scale_fill_Publication <- function(...){
+  library(scales)
+  discrete_scale("fill","Publication", 
+                 manual_pal(values = c("#386cb0","#fdb462","#7fc97f",
+                                       "#ef3b2c","#662506","#a6cee3",
+                                       "#fb9a99","#984ea3","#ffff33")), ...)
+}
+
+scale_colour_Publication <- function(...){
+  library(scales)
+  discrete_scale("colour","Publication", 
+                 manual_pal(values = c("#386cb0","#fdb462","#7fc97f",
+                                       "#ef3b2c","#662506","#a6cee3",
+                                       "#fb9a99","#984ea3","#ffff33")), ...)
+}
+@
+
+
+<<ch-01, eval=TRUE, echo=TRUE>>=
+df_ess <- read.table(file = "../../02-Data/ess.tsv",
+                     header = TRUE)
+df_ess$trustind <- rowMeans(df_ess[, c("ppltrst", "pplfair", "pplhlp")],
+                            na.rm = TRUE)
+@
+
+As dependent variable, I will be using a simple index of pro-social attitudes, which I've constructed here as a simple average of the three variables present in the data set: \textbf{\texttt{ppltrst}} (``most people can be trusted''), \textbf{\texttt{pplfair}} (``most people try to be fair''), and \textbf{\texttt{pplhlp}} (``most people try to be helpful''). More sophisticated measures can be used, of course, such as factor-based scales, but for our demonstration a simple average should be sufficient.
+
+<<ch-0201, eval=FALSE, echo=TRUE>>=
+ggplot(data = DF_ess,
+       aes(x = trustind)) +
+  geom_histogram() +
+  facet_wrap(~ cntry, ncol = 4) +
+  theme_clean() +
+  labs(x = "Pro-social attitudes",
+       y = "Frequency")
+@
+
+<<ch-0202, eval=FALSE, echo=FALSE>>=
+gr1 <- ggplot(data = df_ess,
+              aes(x = trustind)) +
+       geom_histogram() +
+       facet_wrap(~ cntry, ncol = 4) +
+       theme_clean() +
+       labs(x = "Pro-social attitudes",
+            y = "Frequency")
+ggsave(gr1, file="../../05-graphs/Supplem-03.pdf",
+      height = 12, width = 8)
+@
+
+\begin{figure}[ht]
+ \centering
+ \includegraphics[scale=0.75]{../../05-graphs/Supplem-03.pdf}
+ \caption{\label{fig:fig-01} Distribution of pro-social attitudes per country}
+\end{figure}
+
+As can be quickly seen from Figure~\ref{fig:fig-01} on page~\pageref{fig:fig-01}, the distribution of the dependent variable is roughly normal in almost all countries in the sample. The only problem is the unexpectedly large number of answers of ``5'' on the scale for most countries. These are producing the spikes clearly seen in most panels of Figure~\ref{fig:fig-01}. As there is not much that can be done to correct this problem, we are left with no choice but to proceed with the analysis.
+
+\afterpage{\clearpage}
+
+\section{Analyses}
+At the individual level, I will be interested in the relationship between education and pro-social attitudes. At the contextual level, I am keen on exploring how corruption impacts these same attitudes. To begin with, let's see whether there is any effect between education and pro-social attitudes, the shape of this effect, and whether it varies between national contexts.
+
+<<ch-03, eval=FALSE, echo=TRUE>>=
+ggplot(data = df_ess,
+       aes(x = eduyrs, y = trustind)) +
+  facet_wrap(~ cntry, ncol = 4) +
+  stat_density_2d() +
+  geom_smooth(method = "lm", 
+              se=FALSE, 
+              color = "red",
+              linewidth = 1.5) +
+  theme_clean() + 
+  labs(x = "Years of education",
+       y = "Pro-social attitudes")
+@
+
+<<ch-04, eval=FALSE, echo=FALSE>>=
+gr2 <- ggplot(data = df_ess,
+              aes(x = eduyrs, y = trustind)) +
+  facet_wrap(~ cntry, ncol = 4) +
+  stat_density_2d() +
+  geom_smooth(method = "lm", 
+              se=FALSE, 
+              color = "red",
+              linewidth = 1.5) +
+  theme_clean() + 
+  labs(x = "Years of education",
+       y = "Pro-social attitudes")
+ggsave(gr2, file = "../../05-graphs/Supplem-04.pdf", height = 12, width = 8)
+rm(gr2)
+@
+
+The plot can be seen in Figure~\ref{fig:fig-02} on page \pageref{fig:fig-02} and presents us with considerable insights. To begin with, there is some variation in the relationship between education and pro-social attitudes. In some countries the relationship is clearly positive (BG, GER, SWE), while in others there appears to be no relationship (FIN, CZ, RUS). Finally, there is also the extreme case of Kosovo, where the relationship is negative.\footnote{If this were an actual analysis, this is the stage where some deep thought would be put into whether Kosovo should be kept in the sample if it exhibits this unusual relationship. In my demo analysis I don't have to worry very much, as Kosovo will drop out of the sample due to missing information on the CPI and Gini index.} More stories surface though. We can see from where the highest density of points is located that countries exhibit different average levels of pro-social attitudes. A clear distinction can be made between post-communist countries, at one end, and Scandinavian nations at the other end. The easiest spot in Figure~\ref{fig:fig-02} where this can be seen is the row that contains Kosovo, Norway and Poland, almost side by side. We see, then, that a post-communism dummy should likely be added to the analysis.
+
+\begin{figure}[!ht]
+  \centering
+  \includegraphics[scale=0.75]{../../05-graphs/Supplem-04}
+  \caption{\label{fig:fig-02} Relationship between education and pro-social attitudes}
+\end{figure}
+
+To begin with, let's run a simple null model---without any substantive predictors in the model. Before this, though, I have to center and standardize the variables I will be using in the analysis, and then clear all missing values.
+
+<<ch-05, eval=TRUE, echo=TRUE, cache=TRUE>>=
+# Group-mean centering
+df_ess %<>%
+  group_by(cntry) %>%
+  mutate(age.cwc = arm::rescale(agea),
+         gend.cwc = arm::rescale(male),
+         edu.cwc = arm::rescale(eduyrs),
+         inc.cwc = arm::rescale(hinctnta))
+
+# Create country-level data
+df_agg <- df_ess %>%
+  group_by(cntry) %>%
+  distinct(gini_net, ti_cpi, postcom) %>%
+  as.data.frame()
+
+df_agg %<>%
+  mutate(gini.cgm = arm::rescale(gini_net),
+         postcom.cgm = arm::rescale(postcom),
+         cpi.cgm = arm::rescale(ti_cpi)) %>%
+  dplyr::select(-c(gini_net, ti_cpi, postcom))
+
+df_ess <- left_join(df_ess, df_agg, by = c("cntry"))
+rm(df_agg)
+
+# Select only variables used and do listwise deletion
+df_sub <- df_ess %>%
+  dplyr::select(cntry, age.cwc, gend.cwc, edu.cwc, inc.cwc,
+                gini.cgm, postcom.cgm, cpi.cgm, trustind) %>%
+  na.omit()
+
+model0 <- lmer(trustind ~ 1 + (1 | cntry), # Specify model
+               data = df_sub, # Data to estimate model on
+               na.action = na.omit, # Ignore missing cases
+               REML = TRUE) # REML estimation for parameters
+summary(model0)
+@
+
+The model is estimated with REML, with individuals nested in countries. The ICC is the ratio of country intercept residual variance and total variance: $\frac{0.9326}{0.9326+3.0644}$= \Sexpr{0.9326/(0.9326+3.0644)}. You can extract any needed quantities from the model, starting with fixed effects, random effects, SEs for fixed effects and random effects using the \texttt{fixef()}, \texttt{ranef()}, \texttt{se.fixef()} or \texttt{se.ranef()} functions from the \texttt{arm} package.
+
+<<ch-06, eval=FALSE, echo=TRUE>>=
+fixef(model0)
+se.fixef(model0)
+@
+
+<<ch-07, eval=FALSE, echo=TRUE>>=
+ranef(model0)
+se.ranef(model0)
+@
+
+<<ch-8, eval=TRUE, echo=FALSE, results='asis'>>=
+model0 %>%
+  tidy(effects = "ran_vals") %>% # extract random effects
+  dplyr::select(-c(effect, group, term)) %>%
+  slice(1:10) %>% # keep first 10 rows
+  rename(Country = level, # rename variables
+         RE = estimate,
+         SE = std.error) %>%
+  kable("latex", booktabs = TRUE, linesep="",
+        caption = "First 10 random effects") %>%
+  kable_styling(position = "center",
+                latex_options = c("hold_position"))
+@
+
+Keep in mind that these are not actual values of trust for each country; they are \textit{deviations} of the countries from the overall level of trust. This is why some of them are negative, wile others are positive. You can also get a few model fit criteria with a few basic functions.
+
+<<ch-9, eval=TRUE, echo=TRUE, warning=FALSE, comment=NA, error=FALSE, message=FALSE>>=
+AIC(model0)
+BIC(model0)
+logLik(model0)
+@
+
+My advice in terms of mixed-effects modeling is to start from simple models and gradually build up the model complexity. That way, if there are estimation warnings or errors, you can quickly diagnose which was the ``guilty'' predictor. If you start off from very complex specifications, it will be very difficult to figure out which of a number of fixed effects or random effects is the culprit. Here, I've started first with the individual-level predictors of pro-social attitudes.
+
+<<ch-10, eval=TRUE, echo=TRUE, cache=TRUE>>=
+model1 <- lmer(trustind ~ age.cwc + gend.cwc + edu.cwc + 
+                 inc.cwc + (1 | cntry), 
+               data = df_sub,
+               REML = TRUE)
+summary(model1)
+@
+
+The results are consistent with what we would expect. A 2 SD increase in age would lead to a 0.3 increase in the level of pro-social attitudes, measured on a 0--10 scale. Men appear to be about -0.13 points less pro-social than women, on average. Both education and income have positive and statistically significant effects on the extent to which an individual exhibits pro-social attitudes. While the null model has an AIC of \Sexpr{round(AIC(model0), digits=2)} and a logLikelihood of \Sexpr{round(logLik(model0), digits=2)}, the AIC of the model with only individual-level predictors is \Sexpr{round(AIC(model1), digits=2)}, and the logLikelihood is \Sexpr{round(logLik(model1), digits=2)}. With this difference between logLikelihoods there is little reason for a likelihood ratio test: the second model fits the data much better than the first one.\footnote{Remember, larger value for the logLikelihood denote a better fitting model. On the negative scale numbers that are closer to 0 are considered larger than numbers that are farther away from 0.}
+
+We  can now proceed to running a model with both individual-level and country-level predictors of pro-social attitudes.
+
+<<ch-11, eval=TRUE, echo=TRUE, cache=TRUE>>=
+model2 <- lmer(trustind ~ age.cwc + gend.cwc + edu.cwc + 
+                 inc.cwc + gini.cgm + postcom.cgm + cpi.cgm + 
+                 (1 | cntry), 
+               data = df_sub,
+               REML = TRUE)
+summary(model2)
+@
+
+Neither the effect of Gini or the post-communism dummy are statistically significant. However, in the case of post-communism, the effect is fairly strong which suggests that there might be something there. It's possible that this is a legacy of the Communist past, or something related to the cutthroat competitive environment immediately following the fall of Communism. On the other hand, the effect of corruption perceptions is clearly positive and statistically significant. A 2 SD increase in CPI (roughly speaking, 4.1 points on a 11 point scale, or about the difference between Romania and Norway in 2013) is associated with an average increase in pro-social attitudes of 2.43 points.\footnote{The CPI is reverse coded: increases in the score denote less corruption.} Does this new model fit the data better than the previous one, though?
+
+<<ch-12, eval=TRUE, echo=TRUE, cache=TRUE>>=
+anova(model1, model2)
+@
+
+The likelihood ratio test can be used to compare the fit of the two models, to determine which is the better fitting model. There is a version of the test in the \texttt{lmtest} package, with the \texttt{lrtest()} command, but I suggest the standard \texttt{anova()} function. This has the benefit of correcting any user mistakes---if two models that differ in their fixed components are estimated with REML and then compared, \texttt{anova()} will re-estimate the models with FIML. With 10 estimated parameters (8 fixed effects and 2 random effects), Model 2 is shown to fit the data better than Model 1.
+
+<<ch-13, eval=TRUE, echo=TRUE, cache=TRUE>>=
+model3 <- lmer(trustind ~ age.cwc + gend.cwc + edu.cwc + 
+                 inc.cwc + gini.cgm + postcom.cgm + cpi.cgm + 
+                 (1 + edu.cwc | cntry),
+               data = df_sub,
+               REML = TRUE)
+summary(model3)
+@
+
+Does Model 3 fit the data better than Model 2? To rephrase it in a clearer way, do we have any reason to believe that the slope of education varies across countries?
+
+<<ch-14, eval=TRUE, echo=TRUE, cache=TRUE>>=
+anova(model2, model3)
+@
+
+The results again suggest that the more complex model fits the data better. Adding two parameters to the estimation procedure (an extra random effect and the correlation between random effects) produced a significantly better fit to the data, as indicated by the likelihood ratio test we ran above. Finally, we can test to see whether corruption perceptions are a predictor of the relationship between education and pro-social attitudes
+
+<<ch-15, eval=TRUE, echo=TRUE, cache=TRUE>>=
+model4 <- lmer(trustind ~ age.cwc + gend.cwc + edu.cwc + 
+                 inc.cwc + gini.cgm + postcom.cgm + cpi.cgm + 
+                 edu.cwc*cpi.cgm + (1 + edu.cwc | cntry), 
+               data = df_sub,
+               control=lmerControl(optCtrl = list(maxfun=100000),
+                                   optimizer = "bobyqa"),
+               REML = TRUE)
+summary(model4)
+@
+
+Unfortunately, the model output indicates that corruption perceptions are not a moderator of the relationship between education and pro-social attitudes.\footnote{I increased the maximum number of iterations, as well as changed the optimizer to \texttt{bobyqa} (``bound optimization by quadratic approximation'').} The coefficient for the interaction term is as far away from statistical significance as it can get. This is also indicated by the comparison of model fit statistics, which gives us little reason to increase the complexity of the model: the more intricate model does not fit the data significantly better than the less complex one.
+
+<<ch-16, eval=TRUE, echo=TRUE, cache=TRUE>>=
+anova(model3, model4)
+# Clearly, model 4 does not fit the data better than
+#   model 3.
+@
+
+
+\section{Displaying model results}
+
+A standard way of presenting model results are regression comparison tables, easily generated through the \texttt{apsrtable}, \texttt{stargazer}, or \texttt{texreg} packages for R. In this example, I will use the latter package.
+
+<<ch-17, eval=FALSE, echo=TRUE, results='asis'>>=
+# For LaTeX output
+texreg(list(model0, model1, model2, model3, model4), 
+       digits=2,
+       custom.model.names=c("Null model", "Model 1", "Model 2",
+                            "Model 3", "Model 4"), 
+       custom.coef.names=c("(Intercept)", "Age (decades)",
+                           "Male", "Education", "Income", 
+                           "Gini", "Post-communism", 
+                           "CPI index","Education*CPI"))
+# For HTML output, that can be read into Word
+htmlreg(list(model0, model1, model2, model3, model4), 
+        digits=2,
+        custom.model.names=c("Null model", "Model 1", "Model 2",
+                             "Model 3", "Model 4"), 
+        custom.coef.names=c("(Intercept)", "Age (decades)",
+                            "Male", "Education", "Income", 
+                            "Gini", "Post-communism", 
+                            "CPI index","Education*CPI"))
+# For output displayed in your R console
+screenreg(list(model0, model1, model2, model3, model4), 
+          digits=2,
+          custom.model.names=c("Null model", "Model 1", "Model 2",
+                               "Model 3", "Model 4"), 
+          custom.coef.names=c("(Intercept)", "Age (decades)",
+                              "Male", "Education", "Income", 
+                              "Gini", "Post-communism", 
+                              "CPI index","Education*CPI"))
+@
+
+<<ch-18, eval=TRUE, echo=FALSE, warning=FALSE, comment=NA, error=FALSE, message=FALSE, results='asis'>>=
+texreg(list(model0, model1, model2, model3, model4),
+       digits=2,
+       custom.model.names=c("Null model", "Model 1", "Model 2",
+                            "Model 3", "Model 4"), 
+       booktabs = TRUE, 
+       dcolumn=TRUE, 
+       label="tab:tab-01",
+       use.packages=FALSE, 
+       custom.coef.names=c("(Intercept)", "Age (decades)",
+                           "Male", "Education", "Income", 
+                           "Gini", "Post-communism", 
+                           "CPI index","Education*CPI"), 
+       fontsize="footnotesize",
+       caption.above = TRUE,
+       float.pos = "!ht")
+@
+
+As you can also see in the models presented in Table~\ref{tab:tab-01}, you will always be required to report the fixed and random effects, as well as a few measures of model fit. Additionally, you have to report the sample sizes at all levels of the model. It is more a matter of preference if you also want to report the covariance between random effects, as I have done in the last row of the table.
+
+Alternatively, you can present predicted values through the \texttt{effects} package, as seen in Figure~\ref{fig:fig-03}.
+
+<<ch-19, eval=FALSE, echo=TRUE, cache=TRUE>>=
+plot(Effect("cpi.cgm", model3),
+     main = "Predicted values plot",
+     xlab = "Corruption perceptions",
+     ylab = "Pro-social attitudes")
+@
+
+<<ch-20, eval=FALSE, echo=FALSE, cache=TRUE>>=
+pdf("../../05-graphs/Supplem-05.pdf", height=5, width=7)
+plot(Effect("cpi.cgm", model3),
+     main = "Predicted values plot",
+     xlab = "Corruption perceptions",
+     ylab = "Pro-social attitudes")
+invisible(dev.off())
+@
+
+\begin{figure}[!ht]
+  \centering
+  \includegraphics[width=0.95\textwidth]{../../05-graphs/Supplem-05.pdf}
+  \caption{Predicted values with \texttt{effects} package}
+  \label{fig:fig-03}
+\end{figure}
+
+Had we obtained any significant results from the interaction model (in Model 4), we would probably have produced a marginal effects plot as well, to show how the effect of education varies depending on CPI.\footnote{Remember that an interaction is symmetric, so the coefficient can be interpreted as how the effect of education varies across contexts with different CPIs, or how the effect of CPI is different for individuals with different levels of education. The interpretation depends mostly on how you have framed your theoretical questions.} Since we did not get a significant coefficient there is little to interpret, although for the sake of practice we can also produce this plot as well.
+
+<<ch-21, eval=FALSE, echo=TRUE, cache=TRUE>>=
+quantile(df_sub$cpi.cgm, c(0.1, 0.5, 0.9))
+plot(effect("edu.cwc:cpi.cgm", model4,
+     xlevels = list(cpi.cgm = c(-0.85, 0.15, 0.65))),
+     main = "Marginal effects plot",
+     xlab = "Corruption perceptions",
+     ylab = "Effect of education on pro-social behavior")
+@
+
+<<ch-22, eval=FALSE, echo=FALSE, cache=TRUE>>=
+pdf("../../05-graphs/Supplem-06.pdf", height = 5, width = 10)
+plot(effect("edu.cwc:cpi.cgm", model4,
+     xlevels = list(cpi.cgm = c(-0.85, 0.15, 0.65))),
+     main = "Marginal effects plot",
+     xlab = "Corruption perceptions",
+     ylab = "Effect of education on pro-social behavior")
+invisible(dev.off())
+@
+
+\begin{figure}[!ht]
+  \centering
+  \includegraphics[width=0.95\textwidth]{../../05-graphs/Supplem-06.pdf}
+  \caption{Marginal effects plot with \texttt{effects} package}
+  \label{fig:fig-04}
+\end{figure}
+
+As can be seen from Figure~\ref{fig:fig-04}, there is no real distinction between the effect of education at different levels of CPI. In a sense this is what the non-significant coefficient of the interaction term told us as well.
+
+\end{document}
