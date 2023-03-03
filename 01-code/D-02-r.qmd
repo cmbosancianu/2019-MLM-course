@@ -77,6 +77,7 @@ Take as an example the case of Poland. Suppose that instead of 1,892 cases, it h
 ```{r prepare-data-poland}
 set.seed(395722)
 df_pl <- df_issp %>%
+    filter(cnt == "PL") %>%
     sample_n(378)
 
 df_issp_temp <- rbind(subset(df_issp, !(df_issp$cnt == "PL")),
@@ -88,7 +89,7 @@ rm(df_pl)
 df_issp_temp %>%
     nest(data = -cnt) %>%
     mutate(mod1 = map(data,
-                      ~lm(poleff ~ age10 + female + educ + urban,
+                      ~lm(poleff ~ age10 + female + educ + urban + incquart,
                           data = .)),
            results = map(mod1, tidy)) %>%
     unnest(results) %>%
@@ -127,7 +128,7 @@ mlm.1 <- lmer(formula = poleff ~ 1 + age10 + female + educ + urban +
 A few comments on the syntax above:
 
 - As long as you start with the formula syntax, there's no need to write `formula = ` every time
-- The model syntax is very similar to regression. on LHS of the `~` is the outcome, while on RHS of the `~` come the predictors (and intercept for the model). These would be the "fixed-effects" in the model.After these, inside the brackets, come the random effects
+- The model syntax is very similar to regression. on LHS of the `~` is the outcome, while on RHS of the `~` come the predictors (and intercept for the model). These would be the "fixed-effects" in the model. After these, inside the brackets, come the random effects
 - Add as many random effects as your specification requires before the `|`. In this case, I only have a random intercept, which is why I wrote only "1" before the `|`. On the RHS of the `|` comes the grouping factor(s), which in my case is `cnt`
 - `REML = ` specifies the type of estimation that is carried out. We will cover this in one of the next sessions. Even if you don't specify it, the model will run, as REML estimation is the default
 - `control = ` allows you to finely control the estimation process, including modifying the default tolerance value, or increase the number of maximum iterations that the model is allowed to run for. The default for `lmer()` is the `nloptwrap` optimizer, which for my data issues a convergence warning. Though the warning does not affect the estimates, it is still annoying to see. This is why I used an alternative optimizer - the results between the two are identical up to the 5th decimal point
@@ -234,7 +235,7 @@ df_plot %>%
                position = position_dodge(width = 0.75),
                aes(color = model)) +
     labs(x = "Country",
-         y = "Effect of education on efficacy") +
+         y = "Intercept (baseline level of efficacy)") +
     theme_clean() +
     geom_errorbar(aes(ymin = estimate - 1.96 * std.error,
                       ymax = estimate + 1.96 * std.error,
@@ -244,7 +245,8 @@ df_plot %>%
                   width = 0) +
     scale_color_colorblind(name = "Specifications",
                            breaks = c("nopool","mlm"),
-                           labels = c("No pooling", "MLM"))
+                           labels = c("No pooling", "MLM")) +
+    theme(legend.position = "bottom")
 
 rm(df_plot)
 ```

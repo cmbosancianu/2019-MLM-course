@@ -1,0 +1,323 @@
+---
+title: "Practice Code: Day 3"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "July 31, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+```{python load-packages}
+import pandas as pd
+pd.set_option('display.precision', 2)
+import numpy as np
+import pyreadr as prr
+import os
+import random
+from plotnine import *
+import statsmodels.formula.api as sm1
+import statsmodels.api as sm2
+import statsmodels.stats.api as sms
+import scipy as sp
+import matplotlib.pyplot as plt
+import itertools
+```
+
+```{python helpful-functions}
+def regress(data, yvar, xvars):
+    Y = data[yvar]
+    X = data[xvars]
+    X['intercept'] = 1.
+    result = sm2.OLS(Y, X).fit()
+    return pd.DataFrame(result.summary2().tables[1])
+
+def fun_two_SD(x):
+    return (x - np.mean(x, axis = 0)) / (2 * np.std(x))
+
+def fun_cent_noSD(x):
+     return x - np.mean(x)
+```
+
+# Centering
+
+So far, we have run models without centering any of the variables. Based on the lecture earlier, we now have the knowledge to start centering our predictors. Just a quick reminder: centering should always be done for predictors, irrespective of whether there is a cross-level interaction in the model or not:
+
+- it will give a meaningful value to the intercept;
+- it will speed up the ML-based estimation algorithm;
+- more important, it will only estimate relationships between L1 predictors and the L1 outcome based on L1 variation, and not a mix of L1 and L2 variation.
+
+Since this centering and standardization is done over and over again, it pays off to have a dedicated function for it: `fun_two_SD()` in the previous code chunk.
+
+In my own applied work I use the Gelman method less often, as I find that some readers find it hard to switch between interpretations in the original scale and interpretations in SD-units. Additionally, I am typically not interested in assessing which variable has a stronger effect; if that is the case, I rely of predictions to show this. This is why I offer here a function only for centering: `fun_cent_noSD()` in the previous code chunk. You can use either one for your own purposes.
+
+To keep things consistent with how Gelman and Hill discuss the topic, though, we will do centering and standardizing in this tutorial, though.
+
+```{python read-data}
+result = prr.read_r("../02-data/01-ISSP.rds")
+df_issp = result[None]
+
+df_issp = df_issp[["cnt", "year", "country", "poleff", "female",
+                   "age10", "educ", "urban", "incquart", "ti_cpi"]]
+df_issp = df_issp.dropna()
+
+df_dumm = pd.get_dummies(df_issp['incquart'], prefix = "inc")
+
+frames = [df_issp, df_dumm]
+df_issp = pd.concat(frames, axis = 1)
+```
+
+```{python center-level-1}
+df_grouped = df_issp.groupby("cnt")[["age10", "female", "educ",
+          "urban", "inc_1", "inc_2",
+          "inc_3", "inc_4"]].transform(lambda x: fun_two_SD(x))
+df_grouped = df_grouped.rename({'age10': 'age10CWC',
+                                'female': 'femCWC',
+                                'educ': 'educCWC',
+                                'urban': 'urbanCWC',
+                                'inc_1': 'inc1CWC',
+                                'inc_2': 'inc2CWC',
+                                'inc_3': 'inc3CWC',
+                                'inc_4': 'inc4CWC'},
+                               axis = 1)
+
+frames = [df_issp, df_grouped]
+df_issp = pd.concat(frames, axis = 1)
+```
+
+Our L2 data was already supplied merged with L1 data, so it first needs to be aggregated back up at the country level, then centered, and then merged back in.
+
+```{python center-level-2}
+df_agg = df_issp.groupby("cnt")["ti_cpi"].mean().reset_index()
+df_agg['cpiCGM'] = fun_two_SD(df_agg['ti_cpi'])
+df_agg = df_agg.drop(['ti_cpi'], axis = 1)
+```
+
+Finally, we merge `df_agg` with `df_issp` using country as a matching indicator.
+
+```{python final-merge}
+df_issp = df_issp.merge(df_agg, on = "cnt", how = "left")
+```
+
+If the group-mean centering worked OK, the mean of the variable after centering in each of the groups should be 0.^[We rely on a custom function to do these calculations, since it involves different operations applied to either single columns or two columns.]
+
+```{python testing-merge, results='asis'}
+def fun_agg(x):
+    d = {}
+    d['age_mean'] = x['age10'].mean()
+    d['age_cwc_mean'] = x['age10CWC'].mean()
+    d['age_corr'] = x[['age10', 'age10CWC']].corr().iloc[1, 0]
+    return pd.Series(d, index=['age_mean', 'age_cwc_mean', 'age_corr'])
+
+df_issp.groupby("cnt").apply(fun_agg).rename({'cnt': 'Country',
+                                              'age_mean': 'Original version',
+                                              'age_cwc_mean': 'Centered version',
+                                              'age_corr': 'Correlation'}).to_html()
+```
+
+
+# Multilevel model: random slopes
+
+The last model we tested yesterday was the one below, though now we will do it with and without the centered versions of the variables.
+
+```{python multilevel-ri-centered-not, results='asis'}
+mlm_uncent = sm1.mixedlm("poleff ~ age10 + female + educ + urban +\
+                              inc_2 + inc_3 + inc_4 + ti_cpi",
+                         df_issp,
+                         groups = df_issp["cnt"]).fit(maxiter = 200000,
+                                                      method = "Powell")
+
+print(mlm_uncent.summary())
+
+mlm_cent = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC +\
+                              urbanCWC + inc2CWC + inc3CWC + inc4CWC + cpiCGM",
+                       df_issp,
+                       groups = df_issp["cnt"]).fit()
+
+print(mlm_cent.summary())
+```
+
+In this particular instance it didn't make much of a difference whether we used the centered or uncentered predictors at the L1, but in other cases it can make a big difference. For our L2 predictor (corruption perceptions index) it actually made a noticeable difference.
+
+## Initial specification
+
+Now we also allow the slope of education to randomly vary, producing a random (varying) intercept & random (varying) slope specification.^[We specify the random effects in the `re_formula =` argument. Even though I haven't included it here, or in the formulas above, a random intercept is estimated by default.]
+
+```{python multilevel-ri-rs-1}
+mlm_2 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM",
+                    df_issp,
+                    groups = df_issp["cnt"],
+                    re_formula = "~educCWC").fit()
+
+print(mlm_2.summary())
+```
+
+```{python multilevel-ri-rs-2}
+mlm_cent.random_effects
+
+mlm_2.random_effects # You've added one more random effect in this specification.
+```
+
+## Variation in the slope
+
+Plotting the variation in the effect of education (we did this yesterday for the intercept in a RI specification).
+
+```{python multilevel-ri-rs-3}
+#| fig.height: 6in
+#| fig.width: 12in
+#| dpi: 144
+
+re_list = list(mlm_2.random_effects.values())
+se_list = list(mlm_2.random_effects_cov.values())
+cnt_list = list(mlm_2.random_effects.keys())
+vec_re = []
+vec_se = []
+vec_cnt = []
+for i in range(len(re_list)):
+     vec_re.append(re_list[:][i][1])
+     vec_cnt.append(cnt_list[:][i])
+     vec_se.append(se_list[:][i]['educCWC'][1] ** (1/2))
+
+mlm_out = pd.DataFrame({'term': vec_cnt, 'coef': vec_re, 'se': vec_se})
+# To these REs, add the value of the intercept and compute CIs
+mlm_out['coef'] = mlm_out['coef'] + mlm_2.fe_params['educCWC']
+mlm_out['ci_lo'] = mlm_out['coef'] - 1.96 * mlm_out['se']
+mlm_out['ci_hi'] = mlm_out['coef'] + 1.96 * mlm_out['se']
+mlm_out = mlm_out.drop('se', axis = 1)
+
+(
+     ggplot(mlm_out) +
+     geom_point(aes(x = "reorder(term, -coef)",
+                    y = "coef"),
+                size = 3) +
+     geom_errorbar(aes(x = "reorder(term, -coef)",
+                       ymin = "ci_lo",
+                       ymax = "ci_hi")) +
+     geom_hline(yintercept = mlm_2.fe_params['educCWC'],
+                size = 1.25,
+                color = "red",
+                linetype = "dashed") +
+     geom_hline(yintercept = mlm_2.fe_params['educCWC'] -\
+                         1.96 * mlm_2.bse_fe['educCWC'],
+                size = 1.25,
+                color = "red",
+                linetype = "dotted") +
+     geom_hline(yintercept = mlm_2.fe_params['educCWC'] +\
+                         1.96 * mlm_2.bse_fe['educCWC'],
+                size = 1.25,
+                color = "red",
+                linetype = "dotted") +
+     labs(x = "Country",
+          y = "Effect of education on efficacy") +
+     theme_bw() +
+     theme(figure_size = (12, 6),
+           legend_position = "top")
+)
+```
+
+The red dashed line denotes the overall slope, while the dots and whiskers plot the group slopes. You could easily generate a similar plot for the varying intercepts, if you wanted to see what is going on.
+
+You can easily see that you are estimating 3 random effects, as well as a correlation between L2 random effects. **R** and **Python** estimate this by default, whereas **Stata** does not.^[Keep this in mind if at some point you notice very slight differences in results between the three software packages.]
+
+# Cross-level interactions
+
+Extend the specification by adding a predictor for the varying slope of education. The substantive implication of this is that you are now testing a hypothesis: that there is a systematic association between the magnitude of the effect of education on political efficacy, and the level of (perceived) corruption in the country.
+
+## Initial specification
+
+```{python multilevel-ri-rs-4}
+mlm_3 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM + educCWC * cpiCGM",
+                    df_issp,
+                    groups = df_issp["cnt"],
+                    re_formula = "~educCWC").fit()
+
+print(mlm_3.summary())
+```
+
+## Present interaction effect
+
+Currently, presenting such interaction effects is a more code-demanding task, as in involves manually specifying a range for the moderator variable, constructing a new data set, obtaining predicted values and uncertainty for them, and then plotting these quantities.
+
+```{python cross-level-graphics-1}
+# As we're dealing with centered variables, their means are all 0 (or very nearly 0)
+df_input = pd.DataFrame(np.array(np.meshgrid(np.linspace(-3, 2, 11),
+                                             np.linspace(-1.2, 0.6, 4))).\
+                         reshape(2, 44).T)
+
+df_input = df_input.rename({0: 'educCWC', 1: 'cpiCGM'}, axis = 1)
+df_input[['age10CWC', 'femCWC', 'urbanCWC', 'inc2CWC',
+          'inc3CWC', 'inc4CWC']] = 0
+
+# Generate predictions based on on fixed effects mean structure
+df_pred = mlm_3.predict(exog = df_input)
+
+df_pred = pd.concat([df_input[['educCWC', 'cpiCGM']], df_pred],
+                    axis = 1).rename({0: 'pred'}, axis = 1)
+```
+
+```{python, cross-level-graphics-2}
+#| fig.height: 6in
+#| fig.width: 10in
+#| dpi: 144
+
+df_pred['cpiCGM'] = df_pred['cpiCGM'].astype("category")
+
+(
+     ggplot(df_pred,
+            aes(x = "educCWC",
+                y = "pred",
+                color = "cpiCGM",
+                group = "cpiCGM")) +
+     geom_point(size = 3) +
+     geom_line() +
+     labs(x = "Education (centered)",
+          y = "Predicted level of political efficacy") +
+     scale_color_discrete(name = "Corruption perceptions",
+                          breaks = [-1.2, -0.6, 0, 0.6],
+                          labels = ["Very high", "High",
+                                    "Average", "Low"]) +
+     theme_bw() +
+     theme(figure_size = (10, 6),
+           legend_position = "top")
+)
+```
+
+Unfortunately, there is currently no implementation in **Python** that I know of that would also allow us to obtain estimates of uncertainty for these predictions. Therefore, we stop here with this tutorial.
+
+# Package versions
+
+Package versions used in this script.
+
+1. `ipykernel`         6.21.2
+2. `ipython`           8.10.0
+3. `jupyter_client`    8.0.3
+4. `jupyter_core`      5.2.0
+5. `matplotlib`        3.6.3
+6. `matplotlib-inline` 0.1.6
+7. `numpy`             1.24.2
+8. `pandas`            1.5.3
+9. `plotnine`          0.10.1
+10. `pyreadr`          0.4.7
+11. `scipy`            1.10.0
+12. `stargazer`        0.0.5
+13. `statsmodels`      0.13.5

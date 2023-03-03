@@ -1,10 +1,10 @@
 ---
-title: "Practice Code: Day 5"
+title: 'Practice Code: Day 5'
 author:
-  name: "Constantin Manuel Bosancianu"
+  name: 'Constantin Manuel Bosancianu'
   orcid: 0000-0001-7950-9798
   email: bosancianu@icloud.com
-date: "August 2, 2019"
+date: 'August 2, 2019'
 bibliography: ../references.bib
 execute:
   eval: true
@@ -20,24 +20,34 @@ format:
     number-sections: true
     reference-location: margin
     embed-resources: true
+jupyter: python3
 ---
 
 # Introduction
 
-```{r load-packages}
-library(pacman)
-p_load(tidyverse, ggeffects, texreg, arm, broom.mixed,
-       ggthemes, broom, knitr, kableExtra, magrittr)
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+```{python load-packages}
+import pandas as pd
+pd.set_option('display.precision', 6)
+import numpy as np
+import pyreadr as prr
+import os
+import random
+from plotnine import *
+import statsmodels.formula.api as sm1
+import statsmodels.api as sm2
+import statsmodels.stats.api as sms
+import scipy as sp
+import matplotlib.pyplot as plt
+from IPython.display import HTML
 ```
 
 We also define here the standard centering function we've been using so far.
 
-```{r helpful-functions}
-# Function from Zoltan Fazekas - it's a user-defined function, so it has to be
-# re-loaded with exery new R session.
-fun_two_SD <- function(x) {
-        (x - mean(x, na.rm = TRUE)) / (2 * sd(x, na.rm = TRUE))
-}
+```{python helpful-functions}
+def fun_two_SD(x):
+    return (x - np.mean(x, axis = 0)) / (2 * np.std(x))
 ```
 
 # Data input and preparation
@@ -62,119 +72,122 @@ We keep only the variables we're interested in - these are some of the same vari
 
 I will also only keep countries that have at least 2 surveys in the data (the reason is that I want to estimate the within-country effect of country-year variables). I also exclude a mail-back survey for Germany, and keep only the telephone one for that same year.
 
-```{r read-data}
-df_cses <- readRDS("../02-data/02-CSES14-subset.rds")
+```{python read-data}
+result = prr.read_r("../02-data/02-CSES14-subset.rds")
+df_cses = result[None]
 
-df_cses %<>%
-    dplyr::select(country, year, cnt.year, poleff, male, age,
-                  educat, income, unmemb, gini10, corr_ind,
-                  comp, mdmh) %>%
-    na.omit()
+df_cses = df_cses[['country', 'year', 'cnt.year', 'poleff', 'male',
+                   'age', 'educat', 'income', 'unmemb', 'gini10',
+                   'corr_ind', 'comp', 'mdmh']].\
+               dropna().\
+               rename({'cnt.year': 'cnt_year'}, axis = 1)
 
-df_cses %<>%
-    filter(country %in% c("Australia", "Austria", "Brazil", "Bulgaria",
+df_cses = df_cses[df_cses.country.isin(["Australia", "Austria", "Brazil", "Bulgaria",
                           "Canada", "Czech Republic", "Denmark", "Finland",
                           "France", "Germany", "Greece", "Hungary", "Iceland",
                           "Israel", "Mexico", "Netherlands", "New Zealand",
                           "Norway", "Philippines", "Poland", "Portugal",
                           "Romania", "Slovakia", "Slovenia", "South Korea",
                           "Spain", "Sweden", "Switzerland", "Taiwan",
-                          "Thailand", "Turkey", "United Kingdom")) %>%
-    filter(!(cnt.year == "DEU22002")) %>%
-    mutate(cnt.year = if_else(cnt.year == "DEU12002", "DEU_2002", cnt.year))
+                          "Thailand", "Turkey", "United Kingdom"])]
+df_cses = df_cses[df_cses.cnt_year != "DEU22002"]
+df_cses.loc[df_cses['cnt_year'] == "DEU12002", 'cnt_year'] = "DEU_2002"
 
-df_cses %<>%
-    mutate(inc1 = if_else(income == 0, 1, 0),
-           inc2 = if_else(income == 1, 1, 0),
-           inc3 = if_else(income == 2, 1, 0),
-           inc4 = if_else(income == 3, 1, 0),
-           inc5 = if_else(income == 4, 1, 0))
+df_dumm = pd.get_dummies(df_cses['income'], prefix = 'inc')
+df_dumm = df_dumm.rename({'inc_0.0': 'inc1',
+                          'inc_1.0': 'inc2',
+                          'inc_2.0': 'inc3',
+                          'inc_3.0': 'inc4',
+                          'inc_4.0': 'inc5'}, axis = 1)
+df_cses = pd.concat([df_cses, df_dumm], axis = 1)
 ```
 
-We are left with `r dim(df_cses)[1]` respondents, from `r length(unique(df_cses$cnt.year))` surveys (country years), from `r length(unique(df_cses$country))` countries.
+We are left with 149,612 respondents, from 123 surveys (country years), from 46 countries.^[You can easily get this information by applying the `nunique()` function to the respective columns.]
 
 # Centering
 
-Let's go again through the centering procedures we went through yesterday, generate the last 3 models we looked at, and display the comparison table for the models.
+Let's go again through the centering procedures we went through yesterday, and generate the last 3 models we looked at.
 
-```{r group-mean-centering-1}
-df_cses %<>%
-    group_by(cnt.year) %>%
-    mutate(ageCWC = fun_two_SD(age),
-           maleCWC = fun_two_SD(male),
-           educCWC = fun_two_SD(educat),
-           inc2CWC = fun_two_SD(inc2),
-           inc3CWC = fun_two_SD(inc3),
-           inc4CWC = fun_two_SD(inc4),
-           inc5CWC = fun_two_SD(inc5),
-           membCWC = fun_two_SD(unmemb))
+```{python group-mean-centering-1}
+df_grouped = df_cses.groupby('cnt_year')[['age', 'male', 'educat',
+                                          'inc1', 'inc2', 'inc3',
+                                          'inc4', 'inc5', 'unmemb']].\
+                transform(lambda x: fun_two_SD(x))
+df_grouped = df_grouped.rename({'age': 'ageCWC',
+                                'male': 'maleCWC',
+                                'educat': 'educCWC',
+                                'inc1': 'inc1CWC',
+                                'inc2': 'inc2CWC',
+                                'inc3': 'inc3CWC',
+                                'inc4': 'inc4CWC',
+                                'inc5': 'inc5CWC',
+                                'unmemb': 'membCWC'},
+                               axis = 1)
+
+df_cses = pd.concat([df_cses, df_grouped], axis = 1)
 ```
 
 At level 2, the group-mean centering requires an additional step.^[This is because our data set came as a single file, with both individual-level and group-level indicators included. Observe the way in which 4 countries (Denmark, Spain, Sweden, and Switzerland) drop out of the sample, since there is no longitudinal variance in the yearly observations for perceptions of corruption.]
 
-```{r group-mean-centering-2}
-df_agg <- df_cses %>%
-    group_by(country, year) %>%
-    summarise(gini10 = mean(gini10, na.rm = TRUE),
-              corr_ind = mean(corr_ind, na.rm = TRUE)) %>%
-    ungroup() %>%
-    group_by(country) %>%
-    mutate(gini10CWC = fun_two_SD(gini10),
-           corrCWC = fun_two_SD(corr_ind)) %>%
-    dplyr::select(-gini10, -corr_ind)
+```{python group-mean-centering-2}
+df_grouped = df_cses.groupby(['country', 'year'])[['gini10', 'corr_ind']].\
+    mean().\
+    reset_index(level = [0, 1])
+# A small data input problem is leading to Spain staying in the sample
+df_grouped.loc[(df_grouped['country'] == "Spain") &\
+      (df_grouped['year'] == 2000), 'corr_ind'] = 0.04
 
-# Merge the centered variables into the old data set
-df_cses <- left_join(df_cses, df_agg, by = c("country", "year"))
-rm(df_agg)
+df_agg = df_grouped.groupby('country')[['gini10', 'corr_ind']].\
+    transform(lambda x: fun_two_SD(x)).\
+    rename({'gini10': 'giniCWC',
+            'corr_ind': 'corrCWC'}, axis = 1)
+df_agg = pd.concat([df_agg, df_grouped[['country', 'year']]], axis = 1)
+
+df_cses = df_cses.merge(df_agg, on = ['country', 'year'], how = 'left')
 ```
 
 At the country level, I center MDMH, as well as the indicator for compulsory voting. Although MDMH is technically a country-year variable, I will first aggregate it at the country-level, since it tends to be fairly stable over time (electoral changes happen relatively rarely).
 
-```{r grand-mean-centering}
-df_agg <- df_cses %>%
-    group_by(country, year) %>%
-    summarise(mdmh = mean(mdmh, na.rm = TRUE),
-              comp = mean(comp, na.rm = TRUE)) %>%
-    ungroup() %>%
-    group_by(country) %>%
-    mutate(mdmhagg = mean(mdmh, na.rm = TRUE),
-           compagg = mean(comp, na.rm = TRUE)) %>%
-    dplyr::select(-mdmh, -comp) %>%
-    summarise(mdmh = unique(mdmhagg),
-              comp = unique(compagg)) %>%
-    mutate(mdmhCGM = fun_two_SD(mdmh),
-           compCGM = fun_two_SD(comp)) %>%
-    dplyr::select(-mdmh, -comp)
+```{python grand-mean-centering}
+df_grouped = df_cses.groupby(['country', 'year'])[['mdmh', 'comp']].\
+    mean().\
+    groupby('country')[['mdmh', 'comp']].\
+    mean().\
+    reset_index(level = 0)
 
-# Merge the centered variable into the old data set
-df_cses <- left_join(df_cses, df_agg, by = c("country"))
-rm(df_agg)
+df_grouped[['mdmhCGM', 'compCGM']] = df_grouped[['mdmh', 'comp']].\
+      apply(fun_two_SD)
+df_grouped = df_grouped.drop(columns = ['mdmh', 'comp'])
+
+df_cses = df_cses.merge(df_grouped, on = 'country', how = 'left')
 ```
 
 One last thing to check: is compulsory voting truly a L3 variable?
 
-```{r check-merging, results='asis'}
-df_cses %>%
-    group_by(country, year) %>%
-    summarise(comp = mean(comp, na.rm = TRUE)) %>%
-    ungroup() %>%
-    group_by(country) %>%
-    summarise(comp = mean(comp, na.rm = TRUE)) %>%
-    ungroup() %>%
-    kable(caption = "Compulsory voting laws across countries",
-          caption.above = TRUE,
-          col.names = c("Country", "Compulsory voting"))
+```{python check-merging, results='asis'}
+df_grouped = df_cses.groupby(['country', 'year']).\
+    agg(comp = ('comp', 'mean')).\
+    groupby('country').\
+    agg(comp = ('comp', 'mean')).\
+    reset_index(level = 0)
+
+HTML(df_grouped.\
+     rename({'country': 'Country',
+             'comp': 'Compulsory voting laws'}, axis = 1).\
+     to_html())
 ```
 
 # 3-level models
 
-Now, for the modeling - let's start as usual: with a null model. It's important to be careful here with the way L2 IDs are constructed. In order to have a hierarchical 3-level model, L2 IDs must not be similar between L3 groups. If in each country the year ID would have been 1, 2, 3..., depending on how many years each country has, the model would have been interpreted by `lmer()` as a cross-classified model (more about this in Week 2).
+Now, for the modeling - let's start as usual: with a null model. **Python** is a bit more forgiving than **R** in terms of group labels here. Even if L2 IDs are similar between L3 groups, **Python** will still consider them as independent groups.^[See the information at: [https://www.statsmodels.org/dev/examples/notebooks/generated/variance_components.html](https://www.statsmodels.org/dev/examples/notebooks/generated/variance_components.html).]
 
-```{r mlm-null-specification}
-mlm.0 <- lmer(poleff ~ 1 + (1 | cnt.year)  + (1 | country),
-              data = df_cses,
-              control = lmerControl(optimizer = "bobyqa"))
-summary(mlm.0)
+```{python mlm-null-specification}
+vc = {'cnt_year': '0 + C(cnt_year)'}
+mlm_0 = sm1.mixedlm("poleff ~ 1",
+                    re_formula = "1",
+                    data = df_cses,
+                    vc_formula = vc,
+                    groups = 'country').fit()
 ```
 
 You have all the information needed to compute the 2 ICCs now:
@@ -184,50 +197,33 @@ You have all the information needed to compute the 2 ICCs now:
 
 Both numbers suggest that in this sample there is very little between country, or between country-year variance in political efficacy to be explained.
 
-```{r mlm-specification-1}
-mlm.1 <- lmer(poleff ~ 1 + ageCWC + maleCWC + educCWC + inc2CWC + inc3CWC +
-                  inc4CWC + inc5CWC + membCWC + gini10CWC + corrCWC + compCGM +
-                  mdmhCGM + (1 | cnt.year) + (1 | country),
-              data = df_cses,
-              control = lmerControl(optimizer = "bobyqa"))
+```{python mlm-specification-1}
+df_cses = df_cses.dropna()
+vc = {'cnt_year': '0 + C(cnt_year)'}
+mlm_1 = sm1.mixedlm("poleff ~ 1 + ageCWC + maleCWC + educCWC + inc2CWC + inc3CWC +\
+                        inc4CWC + inc5CWC + membCWC + giniCWC + corrCWC + compCGM +\
+                        mdmhCGM",
+                    re_formula = "1",
+                    data = df_cses,
+                    vc_formula = vc,
+                    groups = 'country').fit()
 ```
 
 Random slopes can be added in the same way, though a bit of care neeeds to be taken when assessing at which level to allow them to vary.
 
-```{r mlm-specification-2}
-mlm.2 <- lmer(poleff ~ 1 + ageCWC + maleCWC + educCWC + inc2CWC + inc3CWC +
-                  inc4CWC + inc5CWC + membCWC + gini10CWC + corrCWC + compCGM +
-                  mdmhCGM + educCWC * corrCWC + (1 + educCWC | cnt.year) +
-                  (1 | country),
-              data = df_cses,
-              control = lmerControl(optimizer = "bobyqa"))
+```{python mlm-specification-2}
+vc = {'cnt_year': '0 + C(cnt_year)', 'educCWC': '0 + educCWC'}
+mlm_2 = sm1.mixedlm("poleff ~ 1 + ageCWC + maleCWC + educCWC + inc2CWC +\
+                        inc3CWC + inc4CWC + inc5CWC + membCWC + giniCWC +\
+                        corrCWC + educCWC * corrCWC + compCGM + mdmhCGM",
+                    re_formula = "1",
+                    data = df_cses,
+                    vc_formula = vc,
+                    groups = 'country').fit()
 ```
 
-```{r display-results, results='asis'}
-htmlreg(list(mlm.1, mlm.2),
-        digits = 3,
-        custom.model.names = c("RI", "RI+RS"),
-        caption = "Comparison of 2 multilevel specifications",
-        caption.above = TRUE,
-        custom.coef.map = list("(Intercept)" = "Intercept",
-                               "ageCWC" = "Age",
-                               "maleCWC" = "Gender (man)",
-                               "educCWC" = "Education",
-                               "inc2CWC" = "2nd income quintile",
-                               "inc3CWC" = "3rd income quintile",
-                               "inc4CWC" = "4th income quintile",
-                               "inc5CWC" = "5th income quintile",
-                               "membCWC" = "Union membership",
-                               "gini10CWC" = "Income inequality (Gini)",
-                               "corrCWC" = "Perceptions of corruption",
-                               "compCGM" = "Compulsory voting laws",
-                               "mdmhCGM" = "Mean district magnitude",
-                               "educCWC:corrCWC" = "Education x Corruption perceptions"),
-        single.row = FALSE,
-        inline.css = TRUE,
-        html.tag = FALSE,
-        head.tag = FALSE,
-        body.tag = FALSE)
+```{python display-results}
+print(mlm_1.summary(), mlm_2.summary())
 ```
 
 # Practice session
@@ -269,6 +265,16 @@ Tasks:
 
 Package versions used in this script.
 
-```{r package-versions}
-sessionInfo()
-```
+1. `ipykernel`         6.21.2
+2. `ipython`           8.11.0
+3. `jupyter_client`    8.0.3
+4. `jupyter_core`      5.2.0
+5. `matplotlib`        3.7.0
+6. `matplotlib-inline` 0.1.6
+7. `numpy`             1.24.2
+8. `pandas`            1.5.3
+9. `plotnine`          0.10.1
+10. `pyreadr`          0.4.7
+11. `scipy`            1.10.1
+12. `stargazer`        0.0.5
+13. `statsmodels`      0.13.5

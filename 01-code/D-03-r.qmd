@@ -322,7 +322,7 @@ Showing predicted values gets us one step closer to the ideal of accessibility.
 
 ```{r cross-level-graphics-3}
 dat1 <- ggpredict(mlm.3,
-                  terms = c("educCWC", "cpiCGM [-40, -20, 0, 20]"),
+                  terms = c("educCWC", "cpiCGM [-1.2, -0.6, 0, 0.6]"),
                   ci.lvl = 0.95,
                   type = "fe")
 ```
@@ -348,13 +348,13 @@ Unfortunately, using the canned `plot()` function gives you only a minimum amoun
 dat1$group <- as.character(dat1$group)
 dat1 <- dat1 %>%
     # Recode group label
-    mutate(group = case_when(group == "-40" ~ "Very low (-40)",
-                             group == "-20" ~ "Low (-20)",
-                             group == "0" ~ "Average (0)",
-                             group == "20" ~ "High (20)"))
+    mutate(group = case_when(group == "-1.2" ~ "Very low (-1.2 SD)",
+                             group == "-0.6" ~ "Low (-0.6 SD)",
+                             group == "0" ~ "Average (0 SD)",
+                             group == "0.6" ~ "High (0.6 SD)"))
 # Order the levels, so that in the facet plot these are listed in order.
-dat1$group <- factor(dat1$group, levels = c("Very low (-40)", "Low (-20)",
-                                            "Average (0)", "High (20)"))
+dat1$group <- factor(dat1$group, levels = c("Very low (-1.2 SD)", "Low (-0.6 SD)",
+                                            "Average (0 SD)", "High (0.6 SD)"))
 ```
 
 ```{r cross-level-graphics-6, fig.height=3, fig.width=9, dpi=144}

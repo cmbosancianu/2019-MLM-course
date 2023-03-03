@@ -1,0 +1,378 @@
+---
+title: 'Practice Code: Day 4'
+author:
+  name: 'Constantin Manuel Bosancianu'
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: 'August 1, 2019'
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+```{python load-packages}
+import pandas as pd
+pd.set_option('display.precision', 2)
+import numpy as np
+import pyreadr as prr
+import os
+import random
+from plotnine import *
+import statsmodels.formula.api as sm1
+import statsmodels.api as sm2
+import statsmodels.stats.api as sms
+import scipy as sp
+import matplotlib.pyplot as plt
+```
+
+We also define here a few helpful functions we will rely on in this code file.
+
+```{python helpful-functions}
+def fun_two_SD(x):
+    return (x - np.mean(x, axis = 0)) / (2 * np.std(x))
+
+def fun_cent_noSD(x):
+     return x - np.mean(x)
+```
+
+# Data input and preparation
+
+We'll use the same data set as in the previous days. We're keeping only the variables we're interested in - compared to the previus days, I will add an additional level-2 predictor.
+
+```{python read-data}
+result = prr.read_r("../02-data/01-ISSP.rds")
+df_issp = result[None]
+
+df_issp = df_issp[['cnt', 'year', 'country', 'poleff', 'female',
+                   'age10', 'educ', 'urban', 'incquart', 'ti_cpi',
+                   'gini10']].dropna()
+
+df_dumm = pd.get_dummies(df_issp['incquart'], prefix = 'inc')
+
+frames = [df_issp, df_dumm]
+df_issp = pd.concat(frames, axis = 1)
+```
+
+## Centering
+
+Let's go again through the centering procedures we went through yesterday, and generate the last 3 models we looked at.
+
+```{python group-mean-centering}
+df_grouped = df_issp.groupby('cnt')[['age10', 'female', 'educ',
+          'urban', 'inc_1', 'inc_2',
+          'inc_3', 'inc_4']].transform(lambda x: fun_two_SD(x))
+df_grouped = df_grouped.rename({'age10': 'age10CWC',
+                                'female': 'femCWC',
+                                'educ': 'educCWC',
+                                'urban': 'urbanCWC',
+                                'inc_1': 'inc1CWC',
+                                'inc_2': 'inc2CWC',
+                                'inc_3': 'inc3CWC',
+                                'inc_4': 'inc4CWC'},
+                               axis = 1)
+
+df_issp = pd.concat([df_issp, df_grouped], axis = 1)
+```
+
+```{python grand-mean-centering}
+df_agg = df_issp.groupby('cnt')[['ti_cpi', 'gini10']].mean().reset_index()
+df_agg[['cpiCGM', 'giniCGM']] = df_agg[['ti_cpi', 'gini10']].apply(fun_two_SD)
+df_agg = df_agg.drop(['ti_cpi', 'gini10'], axis = 1)
+```
+
+```{python merge-data}
+df_issp = df_issp.merge(df_agg, on = 'cnt', how = 'left')
+```
+
+## Initial specifications
+
+We estimate 4 specifications, in increasing level of complexity, starting with the null model.^[In order to be able to extract common measures of model fit in addition to the *log-likelihood*, we have to estimate the specifications with standard ML (not REML).]
+
+```{python mlm-specifications-1}
+mlm_0 = sm1.mixedlm("poleff ~ 1",
+                    data = df_issp,
+                    groups = df_issp["cnt"]).fit(reml = False)
+
+mlm_1 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM",
+                    data = df_issp,
+                    groups = df_issp["cnt"]).fit(reml = False)
+
+mlm_2 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM",
+                    re_formula = "~educCWC",
+                    data = df_issp,
+                    groups = df_issp["cnt"]).fit(reml = False)
+
+mlm_3 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM + educCWC * cpiCGM",
+                    re_formula = "~educCWC",
+                    data = df_issp,
+                    groups = df_issp["cnt"]).fit(reml = False)
+
+print(mlm_0.summary(), mlm_1.summary(), mlm_2.summary(), mlm_3.summary())
+```
+
+
+
+
+# Model fit
+
+As you could see in the previous days, the `summary()` function doesn't give you any indication about the model fit beyond the *log-likelihood*.^[Which you can also extract with `model_object.llf`.] A set of dedicated functions exist for this, but to apply these we **have** to re-estimate the model
+
+```{python model-fit-1}
+mlm_1.llf
+mlm_2.llf
+mlm_3.llf
+```
+
+You also have functions for AIC and BIC (there's not much sense to have a function for deviance, since it's computed as $-2 * logLik$).
+
+```{python model-fit-2}
+mlm_1.aic
+mlm_2.aic
+mlm_3.aic
+```
+
+```{python model-fit-3}
+mlm_1.bic
+mlm_2.bic
+mlm_3.bic
+```
+
+Unfortunately, there isn't a automated test that can compare the model fit, as the `anova_lm()` function only handles linear models in **Python**. However, you can easily do such a test manually, if you remember that:
+
+1. The deviance is computed as $-2 \times logLik$
+2. The difference of 2 deviances for nested models has a $\chi^2$ distribution
+3. The degrees of freedom for this test are the difference in estimated model parameters between the two models
+
+With this information, you can check if your difference is *larger* than the critical threshold for the $\chi^2$ distribution for a specific number of degrees of freedom.^[See an example table here: [https://people.richland.edu/james/lecture/m170/tbl-chi.html](https://people.richland.edu/james/lecture/m170/tbl-chi.html).]
+
+```{python model-fit-test-1}
+dev_2 = -2 * mlm_2.llf
+dev_3 = -2 * mlm_3.llf
+
+dev_2 - dev_3
+```
+
+Since we only estimated one additional parameter between `mlm_2` and `mlm_3` (one interaction term), the number of degrees of freedom is 1. At this level, the difference we obtain definitely clears the critical threshold of 3.841, which means `mlm_3` fits the data significantly better than `mlm_2`.
+
+As an additional specification, let's also try a model that includes Gini as predictor for the intercept at L1.
+
+```{python mlm-specifications-2}
+mlm_4 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM + giniCGM +\
+                          educCWC * cpiCGM",
+                    re_formula = "~educCWC",
+                    data = df_issp,
+                    groups = df_issp["cnt"]).fit(reml = False)
+print(mlm_4.summary())
+```
+
+Is there maybe a differential effect of Gini on education groups, though?
+
+```{python mlm-specifications-2}
+mlm_5 = sm1.mixedlm("poleff ~ age10CWC + femCWC + educCWC + urbanCWC +\
+                         inc2CWC + inc3CWC + inc4CWC + cpiCGM + giniCGM +\
+                          educCWC * cpiCGM + educCWC * giniCGM",
+                    re_formula = "~educCWC",
+                    data = df_issp,
+                    groups = df_issp["cnt"]).fit(reml = False)
+print(mlm_5.summary())
+```
+
+Which one fits the data better?
+
+```{python model-fit-test-2}
+dev_4 = -2 * mlm_4.llf
+dev_5 = -2 * mlm_5.llf
+
+dev_3 - dev_4
+dev_4 - dev_5
+```
+
+
+
+
+# Diagnostic checks
+
+Let's take Model 5, which seemed to be the most promising of all the specifications tested so far, at least if we judge based on the indices of model fit discussed earlier today and the manual LRT I conducted above.
+
+Start from examining Level-1 residuals.
+
+```{python mlm-diagnostics-1}
+df_issp['resid'] = mlm_5.resid
+```
+
+## Linearity
+
+Look at a plot of residuals vs. the outcome...
+
+```{python mlm-diagnostics-2}
+#| fig-height: 6
+#| fig-width: 8
+#| dpi: 144
+
+(
+     ggplot(df_issp) +
+     geom_point(aes(x = "poleff",
+                    y = "resid")) +
+     labs(x = "Political efficacy",
+          y = "Residual") +
+     theme_bw() +
+     theme(figure_size = (8, 6))
+)
+```
+
+It's normal that it's tilted; getting rid of the tilt requires you to plot residuals against fitted values. Try it and see what comes out.
+
+... as well as residuals against the predictors at L1.
+
+```{python mlm-diagnostics-3}
+#| fig-height: 6
+#| fig-width: 8
+#| dpi: 144
+
+(
+     ggplot(df_issp) +
+     geom_point(aes(x = "age10CWC",
+                    y = "resid")) +
+     labs(x = "Age (centered)",
+          y = "Residual") +
+     theme_bw() +
+     theme(figure_size = (8, 6))
+)
+```
+
+```{python mlm-diagnostics-4}
+#| fig-height: 6
+#| fig-width: 8
+#| dpi: 144
+
+(
+     ggplot(df_issp) +
+     geom_point(aes(x = "educCWC",
+                    y = "resid")) +
+     labs(x = "Education (centered)",
+          y = "Residual") +
+     theme_bw() +
+     theme(figure_size = (8, 6))
+)
+```
+
+With dichotomous predictors there is not much chance to diagnose a non-linear trend, so we won't need to generate these plots.
+
+## Homogeneity of variance across groups
+
+This is the Bartlett-Kendall test we discussed.
+
+```{python mlm-diagnostics-5}
+data = [df_issp[df_issp['cnt'] == "AU"]['resid'],
+        df_issp[df_issp['cnt'] == "AT"]['resid'],
+        df_issp[df_issp['cnt'] == "CL"]['resid'],
+        df_issp[df_issp['cnt'] == "TW"]['resid'],
+        df_issp[df_issp['cnt'] == "HR"]['resid'],
+        df_issp[df_issp['cnt'] == "CZ"]['resid'],
+        df_issp[df_issp['cnt'] == "DK"]['resid'],
+        df_issp[df_issp['cnt'] == "FI"]['resid'],
+        df_issp[df_issp['cnt'] == "FR"]['resid'],
+        df_issp[df_issp['cnt'] == "GE"]['resid'],
+        df_issp[df_issp['cnt'] == "IS"]['resid'],
+        df_issp[df_issp['cnt'] == "IN"]['resid'],
+        df_issp[df_issp['cnt'] == "JP"]['resid'],
+        df_issp[df_issp['cnt'] == "KR"]['resid'],
+        df_issp[df_issp['cnt'] == "LT"]['resid'],
+        df_issp[df_issp['cnt'] == "NL"]['resid'],
+        df_issp[df_issp['cnt'] == "NO"]['resid'],
+        df_issp[df_issp['cnt'] == "PH"]['resid'],
+        df_issp[df_issp['cnt'] == "PL"]['resid'],
+        df_issp[df_issp['cnt'] == "RU"]['resid'],
+        df_issp[df_issp['cnt'] == "SK"]['resid'],
+        df_issp[df_issp['cnt'] == "SI"]['resid'],
+        df_issp[df_issp['cnt'] == "ZA"]['resid'],
+        df_issp[df_issp['cnt'] == "ES"]['resid'],
+        df_issp[df_issp['cnt'] == "SE"]['resid'],
+        df_issp[df_issp['cnt'] == "CH"]['resid'],
+        df_issp[df_issp['cnt'] == "TR"]['resid'],
+        df_issp[df_issp['cnt'] == "US"]['resid'],
+        df_issp[df_issp['cnt'] == "VE"]['resid'],
+        df_issp[df_issp['cnt'] == "BE"]['resid'],
+        df_issp[df_issp['cnt'] == "DE"]['resid'],
+        df_issp[df_issp['cnt'] == "IL"]['resid'],
+        df_issp[df_issp['cnt'] == "GB"]['resid'],
+        df_issp[df_issp['cnt'] == "EE"]['resid'],
+        df_issp[df_issp['cnt'] == "NZ"]['resid']]
+
+sp.stats.bartlett(data[0], data[1], data[2], data[3], data[4],
+                  data[5], data[6], data[7], data[8], data[9],
+                  data[10], data[11], data[12], data[13], data[14],
+                  data[15], data[16], data[17], data[18], data[19],
+                  data[20], data[21], data[22], data[23], data[24],
+                  data[25], data[26], data[27], data[28], data[29],
+                  data[30], data[31], data[32], data[33], data[34])
+```
+
+Unfortunately, we soundly reject $H_0$, which means that we do **NOT** have homogeneity of variances of residuals across countries.
+
+```{python mlm-diagnostics-6, results='asis'}
+df_grouped = df_issp.groupby('cnt')['resid'].var().reset_index()
+df_grouped.to_html()
+```
+
+If this was an analysis intended for publishing there would be little reason to advance further, but for didactic purposes we can proceed.
+
+## Normally-distributed errors
+
+```{python mlm-diagnostics-7}
+#| fig-height: 6
+#| fig-width: 8
+#| dpi: 144
+
+(
+     ggplot(df_issp,
+            aes(sample = "resid")) +
+     stat_qq() +
+     stat_qq_line() +
+     theme_bw() +
+     theme(figure_size = (8, 6))
+)
+```
+
+## Level 2 residuals
+
+Unfortunately, automatically generating this quantity is not yet implemented as part of the `statsmodels` package.
+
+
+# Package versions
+
+Package versions used in this script.
+
+1. `ipykernel`         6.21.2
+2. `ipython`           8.11.0
+3. `jupyter_client`    8.0.3
+4. `jupyter_core`      5.2.0
+5. `matplotlib`        3.7.0
+6. `matplotlib-inline` 0.1.6
+7. `numpy`             1.24.2
+8. `pandas`            1.5.3
+9. `plotnine`          0.10.1
+10. `pyreadr`          0.4.7
+11. `scipy`            1.10.1
+12. `stargazer`        0.0.5
+13. `statsmodels`      0.13.5

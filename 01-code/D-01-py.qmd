@@ -1,0 +1,465 @@
+---
+title: "Practice Code: Day 1"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "July 29, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+I have to assume sufficient baseline knowledge of **Julia**, so we will start directly with some more advanced procedures. If you feel we're going to fast, please come see me after the first session ends, and I can suggest a few materials you can consult before the next few labs.
+
+Irrespective of which text editor you are using, when compiling this code file the working directory will automatically be set to the folder where this code file is located in. If you want to run the code line by line, you set the working directory on your own. You can check the current working directory with the `os.getcwd()` function, and you can set a new working directory with the `os.chdir()` function.
+
+All scripts assume that you are in the directory where the code file is placed: `./01-code`. They further assume that in the main "Multilevel" project folder you have the following subfolders:
+- `./02-data`
+- `./03-slides`
+- `./04-output`
+- `./05-graphs`
+
+If you have this folder structure in place, the code file should work from beginning to end without an error.
+
+Helpful tips:
+- when you don't remember the arguments for a function, make use of the `?` function, e.g. `?ols`
+- when you don't remember how to extract elements from an object, turn to the `dir()` function
+- if you're missing a package on your machine, quickly install it with the following snippet of code in a Terminal instance: `pip3 install package_name`
+
+Though the code has been written entirely from scratch, and I have replaced most of the empirical examples, a lot of the logic of the sequences is inspired by the precursor to this course, taught by Zoltan Fazekas. I was a TA for that course for a number of years, and have learned a great deal in the process.
+
+**Warning**: the code chunk below will require that these packages are already installed on your system.
+
+```{python load-packages}
+import pandas as pd
+pd.set_option('display.precision', 2)
+import numpy as np
+import pyreadr as prr
+import os
+from plotnine import *
+import statsmodels.formula.api as sm1
+import statsmodels.api as sm2
+import statsmodels.stats.api as sms
+import matplotlib.pyplot as plt
+from statsmodels.compat import lzip
+from stargazer.stargazer import Stargazer
+from IPython.core.display import HTML
+```
+
+```{python helpful-functions}
+def regress(data, yvar, xvars):
+    Y = data[yvar]
+    X = data[xvars]
+    X['intercept'] = 1.
+    result = sm2.OLS(Y, X).fit()
+    return pd.DataFrame(result.summary2().tables[1])
+```
+
+# Reading data
+
+The code chunk below assumes that the data set is in the `02-data` folder. This means we have to go one folder up from the code folder, and then into the data folder.
+
+```{python read-data}
+result = prr.read_r("../02-data/01-ISSP.rds")
+df_issp = result[None]
+```
+
+# Codebook
+
+Many variables added there; please check the codebook for this data set (**Codebook-ISSP.pdf**, located in the `./06-docs` folder).
+
+The most important ones for our purposes here are:
+
+1. `cnt`: a 2-letter code for the country from which the respondent comes from
+2. `poleff`: an index of political efficacy, obtained as a mean of `V41`, `V42`, `V43` and `V44`. Higher values denote a higher level of political efficacy
+3. `female`: a dummy indicator for gender (1 = woman; 0 = man)
+4. `age10`: continuous indicator for age, measured in decades (32 years = 3.2 decades)
+5. `educ`: number of years of full time education completed
+6. `incquart`: a country-specific placement on a 4-point income ranking (1=lowest 25% income........ 4 = highest 25% income)
+7. `year`: year of the survey
+8. `country`: full name of the country
+
+We will keep only the variables we're interested in.^[**Warning**: this will overwrite the data in memory, as the data frames have the same name (`df_issp`).]
+
+```{python subset-variables}
+df_issp = df_issp[["cnt", "year", "country", "poleff", "female",
+                   "age10", "educ", "incquart"]]
+```
+
+# Examine data
+
+You already know the tools in **Python** for examining data that is intended to be used in a regression analysis.
+
+The code below displays a correlation matrix for `poleff`, `age10`, and `educ`.
+
+```{python check-correlation}
+df_issp[["poleff", "age10", "educ"]].corr()
+```
+
+Quick summary statistics for the dataset.
+
+```{python summary-data}
+df_issp.describe()
+```
+
+Something more specific to multilevel modeling is the need to look at breakdowns of the data and associations for each of the groups.
+
+```{python summary-data-by-group, results='asis'}
+df_out = df_issp.groupby(["cnt"])["poleff"].mean().reset_index()
+df_out.to_html()
+```
+
+Most functions can be used in this way, from median, to range, to SD etc. This can even further feed into code to display these quantities graphically, using the functionality provided by the **plotnine** package.
+
+```{python display-data-by-group}
+#| fig-height: 4in
+#| fig-width: 9in
+#| dpi: 144
+#| warning: false
+#| message: false
+
+(
+     ggplot(df_out) +
+     geom_point(aes(x = "reorder(cnt, -poleff)",
+                    y = "poleff"),
+                    color = "LightBlue") +
+     labs(x = "Country",
+          y = "Average political efficacy") +
+     theme_bw() +
+     theme(figure_size=(9, 4))
+)
+```
+
+Above, we're bringing into `ggplot()` the data set that is produced by grouping and then summarizing.
+
+Getting a measure of the SE of the mean is a bit more work, but it can be done with the custom function we defined at the beginning of the script.
+
+```{python display-data-by-group-with-uncertainty}
+#| fig.height: 4in
+#| fig.width: 9in
+#| dpi: 144
+#| warning: false
+#| message: false
+
+df_out = df_issp.groupby('cnt').agg(Mean=('poleff', 'mean'), SE=('poleff', 'sem')).reset_index()
+df_out["lower"] = df_out["Mean"] - 1.96 * df_out["SE"]
+df_out["upper"] = df_out["Mean"] + 1.96 * df_out["SE"]
+
+(
+     ggplot(df_out) +
+     geom_point(aes(x = "reorder(cnt, -Mean)",
+                    y = "Mean"),
+                    color = "LightBlue") +
+     geom_errorbar(aes(x = "reorder(cnt, -Mean)",
+                       ymin = "lower",
+                       ymax = "upper")) +
+     labs(x = "Country",
+          y = "Average political efficacy") +
+     theme_bw() +
+     theme(figure_size=(9, 4))
+)
+```
+
+Fairly easy to plot bivariate associations as well, though it's important to keep in mind that with a large number of groups some tricks (e.g., use of color or shapes to denote group membership) are not feasible any more.
+
+```{python display-bivariate-relationships-1}
+#| fig.height: 10in
+#| fig.width: 12in
+#| dpi: 144
+#| warning: false
+#| message: false
+
+df_complete = df_issp[["cnt", "poleff", "educ"]].dropna()
+
+(
+     ggplot(df_complete,
+            aes(x = "educ",
+                y = "poleff")) +
+     geom_point(color = "LightBlue",
+                alpha = 0.4) +
+     facet_wrap("cnt", ncol = 7) +
+     geom_smooth(method = "lm") +
+     labs(x = "Education (year)",
+          y = "Political efficacy") +
+     theme_bw() +
+     theme(figure_size=(12, 10))
+)
+```
+
+**QUICK TASK**: Modify the code above so that instead of separate panels we get a plot with different colors for the different countries.^[Why is there no data for Hungary?]
+
+You might reasonably doubt the existence of a linear relationship, but we can quickly check for this by using a LOESS smoother.
+
+```{python display-bivariate-relationships-3}
+#| fig.height: 10in
+#| fig.width: 12in
+#| dpi: 144
+#| warning: false
+#| message: false
+
+(
+     ggplot(df_complete,
+            aes(x = "educ",
+                y = "poleff")) +
+     geom_point(color = "LightBlue",
+                alpha = 0.4) +
+     facet_wrap("cnt", ncol = 7) +
+     geom_smooth(method = "loess", span = 0.9, se = False) +
+     labs(x = "Education (year)",
+          y = "Political efficacy") +
+     theme_bw() +
+     theme(figure_size=(12, 10))
+)
+```
+
+Though it didn't seem like it, the graphical displays above are already testing a model specification and giving you a measure of association between the two variables. For exploratory purposes it's fine if the plots look like this, though for published work they will have to be polished further.
+
+# Regression
+
+We will start by adding a few more predictors to the model, in addition to education. We will also remove all missing cases from the outset, for the sake of convenience.
+
+## Initial regression
+
+```{python initial-regression}
+df_complete = df_issp[["cnt", "poleff", "educ", "age10", "female"]].dropna()
+df_complete["female"] = df_complete["female"].astype("category")
+
+ols_1 = sm1.ols(formula = "poleff ~ age10 + female + educ",
+                data = df_complete).fit()
+print(ols_1.summary())
+```
+
+If something from this table of results is not clear, let's stop here for a few minutes and clarify it!
+
+You can easily extract quantities of interest from the object.
+
+```{python regression-quantities-interest-1}
+print(ols_1.params)
+print(ols_1.fittedvalues[1:20])
+print(ols_1.resid[1:20])
+```
+
+The relationship between these quantities of interest.
+
+```{python regression-quantities-interest-2, results='asis'}
+df_qoi = pd.DataFrame({"Fitted values": ols_1.fittedvalues[1:20],
+                       "Residuals": ols_1.resid[1:20],
+                       "Political efficacy (measured)": df_complete["poleff"][1:20]})
+
+df_qoi.to_html()
+```
+
+## Predictions
+
+Based on the regression output object, we can easily obtain predicted values.^[In the code below, `age10` and `educ` are set to their sample means, while `female` is allowed to vary.]
+
+```{python predictions-gender}
+#| fig.height: 3in
+#| fig.width: 4in
+#| dpi: 144
+#| warning: false
+#| message: false
+
+df_inp = pd.DataFrame(data = {"age10": [4.79, 4.79],
+                              "female": [0, 1],
+                              "educ": [12.5, 12.5]})
+
+df_pred = ols_1.get_prediction(df_inp).summary_frame(alpha = 0.05).reset_index()
+
+(
+     ggplot(df_pred,
+            aes(x = "index",
+                y = "mean")) +
+     geom_point(color = "LightBlue",
+                size = 3) +
+     geom_errorbar(aes(x = "index",
+                       ymin = "mean_ci_lower",
+                       ymax = "mean_ci_upper"),
+                   width = 0.01) +
+     scale_x_continuous(breaks = [0, 1],
+                        labels = ["Male", "Female"]) + 
+     labs(x = "Gender",
+          y = "Political efficacy") +
+     theme_bw() +
+     theme(figure_size=(4, 3))
+)
+```
+
+We can do the same for a continuous predictor.^[`age10` is set at its sample mean. `female` is set to 1. `educ` is set to range from the minimum to the maximum value in the sample.]
+
+```{python predictions-education}
+#| fig.height: 3in
+#| fig.width: 4in
+#| dpi: 144
+#| warning: false
+#| message: false
+
+df_inp = pd.DataFrame(data = {"age10": [4.79] * 200,
+                              "female": [1] * 200,
+                              "educ": np.linspace(0, 30, num = 200)})
+
+df_pred = ols_1.get_prediction(df_inp).summary_frame(alpha = 0.05).reset_index()
+
+(
+     ggplot(df_pred,
+            aes(x = "index",
+                y = "mean")) +
+     geom_line(color = "Black") +
+     geom_ribbon(aes(x = "index",
+                     ymin = "mean_ci_lower",
+                     ymax = "mean_ci_upper"),
+                 alpha = 0.2) +
+     scale_x_continuous(breaks = [0, 49, 99, 149, 199],
+                        labels = ["0", "7.5", "15", "22.5", "30"]) + 
+     labs(x = "Education (years)",
+          y = "Political efficacy") +
+     theme_bw() +
+     theme(figure_size=(4, 3))
+)
+```
+
+## Contextual differences in effects
+We can also uncover how the effect for education is different between the different countries in our sample.
+
+```{python effect-heterogeneity}
+#| fig.height: 4in
+#| fig.width: 9in
+#| dpi: 144
+
+df_res = df_complete.groupby('cnt').apply(regress, 'poleff',
+                                          ['age10', 'female', 'educ']).reset_index()
+
+df_res = df_res.rename({'level_1': 'level', 'Coef.': 'coef',
+                        'Std.Err.': 'stderr', 't': 'tval', 'P>|t|': 'pvalue',
+                        '[0.025': 'ci_lo', '0.975]': 'ci_hi'}, axis = 1)
+
+df_res = df_res.loc[df_res['level'] == 'educ']
+df_res = df_res.drop(['level', 'stderr', 'tval', 'pvalue'], axis = 1)
+
+(
+     ggplot(df_res) +
+     geom_point(aes(x = "reorder(cnt, -coef)",
+                    y = "coef"),
+                    color = "LightBlue") +
+     geom_errorbar(aes(x = "reorder(cnt, -coef)",
+                       ymin = "ci_lo",
+                       ymax = "ci_hi")) +
+     geom_hline(yintercept = 0,
+                size = 1.25,
+                color = "red",
+                linetype = "dashed") +
+     labs(x = "Country",
+          y = "Eff. of education on efficacy") +
+     theme_bw() +
+     theme(figure_size=(9, 4))
+)
+```
+
+We can see that there are differences in effect size, but we can't really explain in a systematic way why they exist.
+
+## Regression assumptions: residuals
+
+How does our full model do in terms of regression assumptions, though? If you remember, the more important assumptions refer to the distribution of residuals from the model.
+
+```{python inspect-residuals}
+#| fig.height: 4in
+#| fig.width: 6in
+#| dpi: 144
+
+sm2.qqplot(ols_1.resid, fit = True, line = "45")
+plt.show()
+```
+
+Any evidence of heteroskedasticity? Typically, this procedure uses studentized residuals, but we can rely on a rough approximation here: standardized residuals.
+
+```{python inspect-heteroskedasticity}
+#| fig.height: 4in
+#| fig.width: 6in
+#| dpi: 144
+
+influence = ols_1.get_influence()
+
+df_res = pd.DataFrame({'fitted': ols_1.fittedvalues,
+                       'stud': influence.resid_studentized_internal})
+
+(
+     ggplot(df_res) +
+     geom_point(aes(x = "fitted",
+                    y = "stud"),
+                    color = "LightBlue") +
+     geom_hline(yintercept = 0,
+                size = 1.25,
+                color = "red",
+                linetype = "dashed") +
+     labs(x = "Fitted values",
+          y = "Standardized residuals") +
+     theme_bw() +
+     theme(figure_size=(6, 4))
+)
+```
+
+The null hypothesis for the Breusch-Pagan test is homoskedasticity, so ideally we would fail to reject it!
+
+```{python test-heteroskedasticity}
+name = ["Lagrange multiplier statistic", "p-value", "f-value", "f p-value"]
+test = sms.het_breuschpagan(ols_1.resid, ols_1.model.exog)
+lzip(name, test)
+```
+
+No such luck in our case, though.
+
+## Corrections for clustered data
+
+Address some of the issues brought about by clustering through the use of country dummies.
+
+```{python country-dummies, results='asis'}
+df_complete["cnt"] = df_complete["cnt"].astype("category")
+
+ols_2 = sm1.ols(formula = "poleff ~ 1 + age10 + female + educ + cnt",
+                data = df_complete).fit()
+ols_2.summary()
+
+HTML(Stargazer([ols_1, ols_2]).render_html())
+```
+
+To find out how slopes vary between contexts, though, we would have to interact the slope for, say, education with each of the dummies in the model. This still wouldn't tell us why an effect varies between contexts, but only how. This is because any explanatory power of a country-level factor would be soaked up by the country dummies. We would only know that "the effect of education is lower in ZA than in the US", but not why this might be so.
+
+# Optional take home tasks
+
+1. Try running through the same descriptives for another variable in the model: income. Run an **ANOVA** between income and political efficacy on the entire sample. Plot the bivariate distribution between income and political efficacy. What's the best way of doing this, considering that there are only 4 categories of income?
+2. Run a regression of political efficacy on income, education and gender for the entire sample.
+3. Are the regression assumptions for this model met (particularly heteroskedasticity)?
+4. Predict the level of political efficacy for a respondent in the 3rd income quartile (`incquart == 3`)
+
+# Package versions
+
+Package versions used in this script.
+
+1. `ipykernel`         6.21.1
+2. `ipython`           8.9.0
+3. `jupyter_client`    8.0.2
+4. `jupyter_core`      5.2.0
+5. `matplotlib`        3.6.3
+6. `matplotlib-inline` 0.1.6
+7. `numpy`             1.24.2
+8. `pandas`            1.5.3
+9. `plotnine`          0.10.1
+10. `pyreadr`          0.4.7
+11. `scipy`            1.10.0
+12. `stargazer`        0.0.5
+13. `statsmodels`      0.13.5

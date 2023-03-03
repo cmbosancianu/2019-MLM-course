@@ -1,0 +1,324 @@
+---
+title: "Practice Code: Day 2"
+author:
+  name: "Constantin Manuel Bosancianu"
+  orcid: 0000-0001-7950-9798
+  email: bosancianu@icloud.com
+date: "July 30, 2019"
+execute:
+  eval: true
+  echo: true
+  warning: false
+  error: false
+format:
+  html:
+    toc: true
+    code-fold: true
+    toc-location: left
+    theme: minty
+    number-sections: true
+    reference-location: margin
+    embed-resources: true
+jupyter: python3
+---
+
+# Introduction
+
+We start as yesterday, by loading a few needed packages, and by defining a few custom functions we use below.
+
+**Warning**: the code chunk below will require that these packages are already installed on your system.
+
+```{python load-packages}
+import pandas as pd
+pd.set_option('display.precision', 2)
+import numpy as np
+import pyreadr as prr
+import os
+import random
+from plotnine import *
+import statsmodels.formula.api as sm1
+import statsmodels.api as sm2
+import statsmodels.stats.api as sms
+import scipy as sp
+import matplotlib.pyplot as plt
+```
+
+```{python helpful-functions}
+def regress(data, yvar, xvars):
+    Y = data[yvar]
+    X = data[xvars]
+    X['intercept'] = 1.
+    result = sm2.OLS(Y, X).fit()
+    return pd.DataFrame(result.summary2().tables[1])
+
+def fun_std_err(vec):
+     np.std(vec, ddof = 1) / np.sqrt(np.size(vec))
+```
+
+# Reading data
+
+Read the same ISSP data set we used yesterday; we keep only the variables we will use today, and do listwise deletion of missing data from the outset.
+
+```{python read-data}
+result = prr.read_r("../02-data/01-ISSP.rds")
+df_issp = result[None]
+
+df_issp = df_issp[["cnt", "year", "country", "poleff", "female",
+                   "age10", "educ", "urban", "incquart", "ti_cpi"]]
+df_issp = df_issp.dropna()
+
+# Convert a few of the predictors into categorical indicators
+for col in ["female", "urban", "incquart"]:
+     df_issp[col] = df_issp[col].astype("category")
+```
+
+# Complete pooling vs. no pooling
+
+Complete pooling designates the model that we fit yesterday - it uses the entire sample to estimate the relationship between predictors and outcome, without any thought given to group membership.
+
+```{python complete-pooling-approach}
+ols_1 = sm1.ols(formula = "poleff ~ age10 + female + educ + urban + incquart",
+                data = df_issp).fit()
+print(ols_1.summary())
+```
+
+Based on this model, all we can say is that the effect of education, or gender, on political efficacy is the same for every respondent, irrespective of which country they come from. Its virtue is that it uses information from the entire sample to estimate the relationship, which results in very small standard errors.
+
+The alternative is what we tried yesterday: running each model separately for each group. The challenge with this approach is that the only information used in the estimation originates with the group itself.
+
+Take as an example the case of Poland. Suppose that instead of 1,892 cases, it had 378 observations (about 20% of the original sample).^[The results here might be slightly different than in the corresponding `R` script, given the different set of rows sampled. The plot will be slightly different as well, in terms of the relative placement of Poland on the horizontal axis.]
+
+```{python prepare-data-poland}
+df_pl = df_issp[df_issp["cnt"] == "PL"].sample(n = 378, random_state = 24057)
+
+frames = [df_issp[df_issp["cnt"] != "PL"], df_pl]
+df_issp_temp = pd.concat(frames)
+```
+
+```{python no-pooling-approach}
+#| fig-height: 6in
+#| fig-width: 9in
+#| dpi: 144
+
+df_res = df_issp_temp.groupby('cnt').apply(regress, 'poleff',
+               ['age10', 'female', 'educ', 'urban', 'incquart']).reset_index()
+
+df_res = df_res.rename({'level_1': 'level', 'Coef.': 'coef',
+                        'Std.Err.': 'stderr', 't': 'tval', 'P>|t|': 'pvalue',
+                        '[0.025': 'ci_lo', '0.975]': 'ci_hi'}, axis = 1)
+
+df_res = df_res.loc[df_res['level'] == 'educ']
+df_res = df_res.drop(['level', 'stderr', 'tval', 'pvalue'], axis = 1)
+
+(
+     ggplot(df_res) +
+     geom_point(aes(x = "reorder(cnt, -coef)",
+                    y = "coef"),
+                    color = "LightBlue") +
+     geom_errorbar(aes(x = "reorder(cnt, -coef)",
+                       ymin = "ci_lo",
+                       ymax = "ci_hi")) +
+     geom_hline(yintercept = 0,
+                size = 1.25,
+                color = "red",
+                linetype = "dashed") +
+     labs(x = "Country",
+          y = "Eff. of education on efficacy",
+          title = "Country-by-country regressions with small sample size for Poland") +
+     theme_bw() +
+     theme(figure_size=(9, 6))
+)
+```
+
+# Multilevel model: random intercepts
+
+We will use the `mixedlm()` function from the `statsmodels` library for these models.
+
+## First model
+
+```{python multilevel-ri-1}
+mlm_1 = sm1.mixedlm("poleff ~ age10 + female + educ + urban + incquart",
+                    df_issp_temp,
+                    groups = df_issp_temp["cnt"]).fit(maxiter = 200000,
+                                                      method = "Powell")
+```
+
+```{python multilevel-ri-2}
+print(mlm_1.summary())
+```
+
+A few comments on the syntax above:
+
+- As long as you start with the formula syntax, there's no need to write `formula = ` every time
+- The model syntax is very similar to regression. on LHS of the `~` is the outcome, while on RHS of the `~` come the predictors. These would be the "fixed-effects" in the model
+- The grouping factor is specified in the `groups = ` argument
+- As the output shows, by default the function uses REML estimation (just like in `R`). We will cover this in one of the next sessions
+- Inside the `fit()` function, you can specify a few arguments that allow you to finely control the estimation process, including modifying the default tolerance value, or increasing the number of maximum iterations that the model is allowed to run for. The default for `mixedlm()` throws out a few convergence warnings. Though the warning does not affect the estimates, it is still annoying to see. This is why I used an alternative optimizer (the modified `Powell` algorithm)
+- The estimates **differ** slightly from those produced by `R`, but only starting from the 3rd decimal point onward
+
+Take a while to look a bit at the result output - looks fairly similar to that from the `ols()` function, though it shows slightly fewer details. It does, however, give you a few crucial pieces of information about the grouping structure of your data (at the top).
+
+## Quantities of interest
+
+You can use a few functions to obtain the fixed effects and random effects from the model.
+
+```{python multilevel-ri-3}
+print(mlm_1.fe_params) # The fixed effects
+```
+
+```{python multilevel-ri-4}
+print(mlm_1.bse_fe) # SEs for the fixed effects
+```
+
+In our case, only a random intercept was specified.
+
+```{python multilevel-ri-5}
+print(mlm_1.random_effects) # The random effects (deviations) in the model
+```
+
+You can can also get the random effect *variances* directly from the `mixedlm` object.
+
+```{python multilevel-ri-6}
+print(mlm_1.random_effects_cov) # The variances for random effects
+```
+
+You can also ask for the confidence intervals, if you prefer them.
+
+```{python multilevel-ri-7}
+mlm_1.conf_int(alpha = 0.05)
+```
+
+## Comparison: no-pooling and multilevel
+
+How do the intercepts from the no-pooling model compare to those from the multilevel one?
+
+I use here the variant of "no-pooling" that Gelman and Hill describe: a model with country indicators. The "-1" tells **Python** to estimate values for all countries, rather than use one of the countries as reference group.
+
+```{python comparison-nopool-mlm-1}
+df_issp_temp["cnt"] = df_issp_temp["cnt"].astype("category")
+
+mod_np = sm1.ols(formula = "poleff ~ -1 + cnt + age10 + female + educ + urban + incquart",
+                 data = df_issp_temp).fit()
+np_out = pd.DataFrame(mod_np.summary2().tables[1])
+np_out = np_out.drop(['Std.Err.', 't', 'P>|t|'], axis = 1)
+np_out = np_out.rename({'Coef.': 'coef', '[0.025': 'ci_lo', '0.975]': 'ci_hi'},
+                       axis = 1)
+np_out = np_out.rename_axis("term").reset_index()
+np_out = pd.DataFrame(np_out[np_out['term'].str.startswith("cnt")])
+np_out['model'] = "nopool"
+```
+
+We next generate the random effects from the multilevel model.^[In the code below we have to add the value of the overall intercept, since the random effects are deviations from this overall intercept.]
+
+```{python comparison-nopool-mlm-2}
+re_list = list(mlm_1.random_effects.values())
+se_list = list(mlm_1.random_effects_cov.values())
+cnt_list = list(mlm_1.random_effects.keys())
+vec_re = []
+vec_se = []
+vec_cnt = []
+for i in range(len(re_list)):
+     vec_re.append(re_list[:][i][0])
+     vec_cnt.append(cnt_list[:][i])
+     vec_se.append(se_list[:][i]['Group'][0] ** (1/2))
+
+mlm_out = pd.DataFrame({'term': vec_cnt, 'coef': vec_re, 'se': vec_se})
+# To these REs, add the value of the intercept and compute CIs
+mlm_out['coef'] = mlm_out['coef'] + mlm_1.fe_params[0]
+mlm_out['ci_lo'] = mlm_out['coef'] - 1.96 * mlm_out['se']
+mlm_out['ci_hi'] = mlm_out['coef'] + 1.96 * mlm_out['se']
+mlm_out = mlm_out.drop('se', axis = 1)
+mlm_out['model'] = 'mlm'
+```
+
+```{python comparison-nopool-mlm-3}
+#| fig.height: 6in
+#| fig.width: 12in
+#| dpi: 144
+
+frames = [np_out, mlm_out]
+df_plot = pd.concat(frames)
+df_plot['term'] = df_plot['term'].map(lambda x: x.lstrip('cnt[').rstrip(']'))
+
+(
+     ggplot(df_plot,
+            aes(color = "model")) +
+     geom_point(aes(x = "reorder(term, -coef)",
+                    y = "coef"),
+                size = 3,
+                position = position_dodge(width = 1)) +
+     geom_errorbar(aes(x = "reorder(term, -coef)",
+                       ymin = "ci_lo",
+                       ymax = "ci_hi"),
+                   position = position_dodge(width = 1)) +
+     geom_hline(yintercept = mlm_1.fe_params[0],
+                size = 1.25,
+                color = "red",
+                linetype = "dashed") +
+     labs(x = "Country",
+          y = "Intercept (baseline efficacy level)") +
+     scale_color_manual(name = "Specifications",
+                        values = ["black", "orange"],
+                        breaks = ["nopool", "mlm"],
+                        labels = ["No pooling", "MLM"]) +
+     theme_bw() +
+     theme(figure_size = (12, 6),
+           legend_position = "top")
+)
+```
+
+## ICC
+
+We determine the need for a MLM by running a null model, and then computing the ICC.
+
+```{python, run-null-model}
+mlm_0 = sm1.mixedlm("poleff ~ 1",
+                    df_issp_temp,
+                    groups = df_issp_temp["cnt"]).fit(maxiter = 200000,
+                                                      method = "Powell")
+print(mlm_0.summary())
+```
+
+The output already gives you all the needed information to compute the ICC.^[The residual variance is labeled in the output as `Scale`.]
+
+```{python, computing-icc}
+0.091 / (0.091 + 0.5231)
+```
+
+# Add level-2 predictors
+
+I will first re-estimate the initial model on the full data set, with the proper data for Poland (as opposed to the truncated sample).
+
+```{python add-l2-predictors-1}
+mlm_1 = sm1.mixedlm("poleff ~ age10 + female + educ + urban + incquart",
+                    df_issp,
+                    groups = df_issp["cnt"]).fit(maxiter = 200000,
+                                                 method = "Powell")
+
+mlm_2 = sm1.mixedlm("poleff ~ age10 + female + educ + urban + incquart + ti_cpi",
+                    df_issp,
+                    groups = df_issp["cnt"]).fit(maxiter = 200000,
+                                                 method = "Powell")
+
+print(mlm_2.summary())
+```
+
+Unfortunately, the `Stargazer()` function hasn't been adapted for mixed-effects models, so we won't be able to see the models with and without perceptions of corruption side-by-side.
+
+# Package versions
+
+Package versions used in this script.
+
+1. `ipykernel`         6.21.1
+2. `ipython`           8.9.0
+3. `jupyter_client`    8.0.2
+4. `jupyter_core`      5.2.0
+5. `matplotlib`        3.6.3
+6. `matplotlib-inline` 0.1.6
+7. `numpy`             1.24.2
+8. `pandas`            1.5.3
+9. `plotnine`          0.10.1
+10. `pyreadr`          0.4.7
+11. `scipy`            1.10.0
+12. `stargazer`        0.0.5
+13. `statsmodels`      0.13.5
