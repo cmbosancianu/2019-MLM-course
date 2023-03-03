@@ -208,4 +208,4 @@ Reading list:
 
 ## Later modifications
 
-To update the code, changes to the materials were made over the course of 2022. These included (1) converting `R` scripts to the `Quarto` format, and (2) creating **Python** companion code.
+To update the code, changes to the materials were made over the course of 2022. These included (1) converting `R` scripts to the `Quarto` format, and (2) creating **Python** companion code for the most commonly-used specifications (2-level and 3-level linear mixed effects models, with random intercepts and random slopes).
